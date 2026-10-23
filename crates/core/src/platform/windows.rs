@@ -32,7 +32,7 @@ use windows_sys::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_LocalAppData,
     FOLDERID_Music, FOLDERID_Pictures, FOLDERID_Profile, FOLDERID_ProgramData,
     FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86, FOLDERID_RoamingAppData, FOLDERID_Videos,
-    FOLDERID_Windows, SHGetKnownFolderPath,
+    FOLDERID_Windows, SHGetKnownFolderPath, SHQUERYRBINFO, SHQueryRecycleBinW,
 };
 use windows_sys::core::{GUID, PWSTR};
 
@@ -470,6 +470,37 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(dir)?
         .sync_all()
+}
+
+/// Creates (or truncates) a file. The user-only ACL is inherited from LocalAppData.
+pub fn create_private(path: &Path) -> io::Result<fs::File> {
+    fs::File::create(path)
+}
+
+/// Nothing to do: the ACL is inherited from LocalAppData.
+pub fn set_private_dir(_dir: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// `%ProgramFiles%`.
+pub fn apps_dir() -> PathBuf {
+    env_path("ProgramFiles").unwrap_or_else(|| r"C:\Program Files".into())
+}
+
+/// Recycle Bin size of the drive whose root is `root` (`SHQueryRecycleBinW`).
+pub fn recycle_bin_bytes(root: &Path) -> Result<u64, String> {
+    let w = wide(root);
+    let mut info = SHQUERYRBINFO {
+        cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32,
+        i64Size: 0,
+        i64NumItems: 0,
+    };
+    // SAFETY: w is NUL-terminated; info is a valid, initialised out-struct with cbSize set.
+    let hr = unsafe { SHQueryRecycleBinW(w.as_ptr(), &mut info) };
+    if hr < 0 {
+        return Err(format!("SHQueryRecycleBinW failed: 0x{hr:08x}"));
+    }
+    Ok(u64::try_from(info.i64Size).unwrap_or(0))
 }
 
 /// Console processes have no graceful stop on Windows.

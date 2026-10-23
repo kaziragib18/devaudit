@@ -7,6 +7,7 @@ pub mod never;
 pub mod platform;
 pub mod procs;
 pub mod projects;
+pub mod report;
 pub mod rules;
 pub mod run;
 pub mod targets;

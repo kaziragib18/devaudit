@@ -21,6 +21,10 @@
 //! - `hide_from_backup_and_index(dir)`, `sync_dir(dir)`
 //! - `graceful_stop(pid)`: macOS SIGTERM; Windows `Err`
 //! - `forbidden_roots(d)`
+//! - `create_private(path)` (macOS 0600), `set_private_dir(dir)` (macOS 0700); Windows relies on the
+//!   ACL inherited from LocalAppData
+//! - `apps_dir()`: `/Applications` | `%ProgramFiles%`
+//! - `recycle_bin_bytes(root)`: Windows `SHQueryRecycleBinW`; `Err` on macOS
 //!
 //! Shared here: `known_dirs`, `eq_ci`, `inside`, `volume_of`, `volume_space`.
 

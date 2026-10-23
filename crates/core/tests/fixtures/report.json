@@ -1,0 +1,223 @@
+{
+  "os": "Macos",
+  "scanned_at": 1760000000,
+  "disk": {
+    "total": 1000,
+    "free": 400,
+    "scanned": 300,
+    "unseen": 200,
+    "trash": 10
+  },
+  "memory": {
+    "total": 16,
+    "available": 8,
+    "swap_used": 1,
+    "swap_total": 2,
+    "pressure": "Normal",
+    "groups": [
+      {
+        "name": "Chrome",
+        "mem": 5,
+        "procs": 3
+      }
+    ]
+  },
+  "findings": [
+    {
+      "id": "62cde1dc4dc05101",
+      "category": "Temp",
+      "title": "Item fixture-6",
+      "path": "/x/fixture-6",
+      "project": null,
+      "owner_processes": [],
+      "bytes": 7000000,
+      "bytes_estimate": false,
+      "idle_days": 60,
+      "tier": "Safe",
+      "reason": "because",
+      "rebuild": "Run npm install",
+      "method": {
+        "Signal": {
+          "pid": 4242,
+          "start_time": 1700000000
+        }
+      }
+    },
+    {
+      "id": "528b7568973e8d00",
+      "category": "AiTool",
+      "title": "Item fixture-3",
+      "path": "/x/fixture-3",
+      "project": null,
+      "owner_processes": [],
+      "bytes": 4000000,
+      "bytes_estimate": false,
+      "idle_days": 30,
+      "tier": "Safe",
+      "reason": "because",
+      "rebuild": null,
+      "method": {
+        "DockerVolumeBackupRm": {
+          "name": "shop_pgdata"
+        }
+      }
+    },
+    {
+      "id": "d67307105af37992",
+      "category": "ProjectBuild",
+      "title": "Item fixture-0",
+      "path": "/x/fixture-0",
+      "project": "/Users/dev/code/shop",
+      "owner_processes": [
+        "node"
+      ],
+      "bytes": 1000000,
+      "bytes_estimate": false,
+      "idle_days": 0,
+      "tier": "Safe",
+      "reason": "because",
+      "rebuild": "Run npm install",
+      "method": {
+        "Vault": {
+          "path": "/Users/dev/code/shop/node_modules",
+          "id": {
+            "volume": 16777234,
+            "index": 12345678
+          },
+          "keep_days": 7
+        }
+      }
+    },
+    {
+      "id": "26b481a2ac10baf7",
+      "category": "Process",
+      "title": "Item no-path",
+      "path": null,
+      "project": null,
+      "owner_processes": [],
+      "bytes": 1,
+      "bytes_estimate": false,
+      "idle_days": 3,
+      "tier": "Safe",
+      "reason": "because",
+      "rebuild": "rebuild it",
+      "method": "None"
+    },
+    {
+      "id": "51554939bce597d4",
+      "category": "Advice",
+      "title": "Item fixture-7",
+      "path": "/x/fixture-7",
+      "project": null,
+      "owner_processes": [],
+      "bytes": 8000000,
+      "bytes_estimate": false,
+      "idle_days": 70,
+      "tier": "Review",
+      "reason": "because",
+      "rebuild": null,
+      "method": "None"
+    },
+    {
+      "id": "da4a1d6a7a50ec29",
+      "category": "Docker",
+      "title": "Item fixture-4",
+      "path": "/x/fixture-4",
+      "project": null,
+      "owner_processes": [],
+      "bytes": 5000000,
+      "bytes_estimate": true,
+      "idle_days": 40,
+      "tier": "Review",
+      "reason": "because",
+      "rebuild": "Run npm install",
+      "method": {
+        "WorktreeVault": {
+          "repo": "/Users/dev/code/shop",
+          "worktree": "/Users/dev/code/shop-wt",
+          "id": {
+            "volume": 16777234,
+            "index": 12345678
+          },
+          "branch": "feature/x",
+          "keep_days": 14
+        }
+      }
+    },
+    {
+      "id": "34cd048447a9156c",
+      "category": "PackageCache",
+      "title": "Item fixture-1",
+      "path": "/x/fixture-1",
+      "project": null,
+      "owner_processes": [],
+      "bytes": 2000000,
+      "bytes_estimate": false,
+      "idle_days": 10,
+      "tier": "Review",
+      "reason": "because",
+      "rebuild": null,
+      "method": {
+        "PruneOlderThan": {
+          "path": "/tmp",
+          "days": 7
+        }
+      }
+    },
+    {
+      "id": "c7c1819a1781af23",
+      "category": "EditorData",
+      "title": "Item fixture-5",
+      "path": "/x/fixture-5",
+      "project": null,
+      "owner_processes": [],
+      "bytes": 6000000,
+      "bytes_estimate": false,
+      "idle_days": 50,
+      "tier": "Protected",
+      "reason": "because",
+      "rebuild": null,
+      "method": {
+        "DockerStop": {
+          "container_ids": [
+            "abc123",
+            "def456"
+          ]
+        }
+      }
+    },
+    {
+      "id": "48490f79fd9c18d1",
+      "category": "BrowserCache",
+      "title": "Item fixture-2",
+      "path": "/x/fixture-2",
+      "project": null,
+      "owner_processes": [],
+      "bytes": 3000000,
+      "bytes_estimate": false,
+      "idle_days": null,
+      "tier": "Protected",
+      "reason": "because",
+      "rebuild": "Run npm install",
+      "method": {
+        "Command": {
+          "argv": [
+            "npm",
+            "cache",
+            "clean",
+            "--force"
+          ]
+        }
+      }
+    }
+  ],
+  "skipped": [
+    {
+      "path": "/x/skipped",
+      "why": "can't read"
+    }
+  ],
+  "notes": [
+    "a note"
+  ]
+}

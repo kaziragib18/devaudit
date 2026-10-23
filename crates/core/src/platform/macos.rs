@@ -192,6 +192,33 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
     fs::File::open(dir)?.sync_all()
 }
 
+/// Creates (or truncates) a file readable by the owner only (0600).
+pub fn create_private(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+}
+
+/// Owner-only directory (0700).
+pub fn set_private_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+}
+
+/// The system-wide applications folder.
+pub fn apps_dir() -> PathBuf {
+    PathBuf::from("/Applications")
+}
+
+/// Windows only: the Recycle Bin is `~/.Trash` here, sized by the caller.
+pub fn recycle_bin_bytes(_root: &Path) -> Result<u64, String> {
+    Err("not supported on macOS".into())
+}
+
 /// SIGTERM to exactly one process (pid 0 or > i32::MAX would address a group).
 pub fn graceful_stop(pid: u32) -> Result<(), String> {
     let pid = libc::pid_t::try_from(pid)
