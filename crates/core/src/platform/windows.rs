@@ -332,6 +332,11 @@ pub fn file_id(p: &Path) -> io::Result<FileId> {
     })
 }
 
+/// Hard links are not detected on Windows (see the pnpm estimate).
+pub fn hardlink_key(_md: &fs::Metadata) -> Option<(u64, u64)> {
+    None
+}
+
 pub fn is_link(md: &fs::Metadata) -> bool {
     md.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }

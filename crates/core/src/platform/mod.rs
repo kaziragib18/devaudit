@@ -11,6 +11,7 @@
 //!   `to` exists (file or empty dir). Never copies across volumes.
 //! - `file_id(p)`: identity of `p` itself, never of a link target
 //! - `is_link(md)`: symlink, junction or any reparse point (pass `symlink_metadata`)
+//! - `hardlink_key(md)`: macOS `(dev, ino)` when nlink > 1; Windows `None`
 //! - `is_cloud_placeholder(md)`: macOS SF_DATALESS; Windows RECALL_ON_* | OFFLINE
 //! - `size_on_disk(md)`: macOS `st_blocks * 512`; Windows length rounded up to 4096, dirs 0
 //! - `is_mount_point(p)`: true on error (fail closed)
@@ -248,14 +249,14 @@ mod fake {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::fs;
     use std::path::Path;
 
     /// Directory link: symlink on macOS; on Windows a symlink (needs Developer
     /// Mode) or else a junction. False (with a note) if neither works.
-    pub(super) fn dir_link(target: &Path, link: &Path) -> bool {
+    pub(crate) fn dir_link(target: &Path, link: &Path) -> bool {
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(target, link).unwrap();

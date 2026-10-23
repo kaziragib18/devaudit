@@ -111,6 +111,11 @@ pub fn size_on_disk(md: &fs::Metadata) -> u64 {
     md.blocks() * 512
 }
 
+/// `(dev, ino)` of a file with more than one hard link, else None.
+pub fn hardlink_key(md: &fs::Metadata) -> Option<(u64, u64)> {
+    (md.nlink() > 1).then(|| (md.dev(), md.ino()))
+}
+
 pub(super) fn os_volume_space(p: &Path) -> io::Result<(u64, u64)> {
     let c = cpath(p)?;
     // SAFETY: statfs is plain old data; all-zero is a valid value.
