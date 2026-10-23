@@ -410,27 +410,42 @@ struct McpGroup {
     sessions: HashSet<u32>,
 }
 
+/// A Claude session: `claude` by exe/name/argv[1] stem, or argv[0] file stem (native installs
+/// whose exe is a version number).
+fn is_claude(p: &Proc) -> bool {
+    stem_matches(p, &["claude".to_string()])
+        || p.cmd
+            .first()
+            .is_some_and(|a| stem_of(a).eq_ignore_ascii_case("claude"))
+}
+
+fn is_shell(p: &Proc) -> bool {
+    const SHELLS: [&str; 7] = ["sh", "bash", "zsh", "fish", "pwsh", "powershell", "cmd"];
+    let (e, n) = (exe_stem(p), name_stem(p));
+    SHELLS.iter().any(|s| e.as_deref() == Some(*s) || n == *s)
+}
+
+/// Own-user, non-shell, non-Claude processes within 2 parent hops of a live Claude process
+/// that run the same command line under >= 2 distinct Claude processes.
 fn duplicate_mcp(s: &Snapshot, out: &mut Vec<Finding>) {
-    let claude = ["claude".to_string()];
-    let live: HashSet<u32> = s
-        .procs
-        .iter()
-        .filter(|p| stem_matches(p, &claude))
-        .map(|p| p.pid)
-        .collect();
+    let by: HashMap<u32, &Proc> = s.procs.iter().map(|p| (p.pid, p)).collect();
+    let claude_at = |pid: Option<u32>| pid.filter(|id| by.get(id).is_some_and(|q| is_claude(q)));
     let mut groups: HashMap<String, McpGroup> = HashMap::new();
     for p in s
         .procs
         .iter()
-        .filter(|p| p.uid_matches_me && mcp_like(p) && !p.cmd.is_empty())
+        .filter(|p| p.uid_matches_me && !p.cmd.is_empty() && !is_claude(p) && !is_shell(p))
     {
+        let session = claude_at(p.parent)
+            .or_else(|| claude_at(p.parent.and_then(|pp| by.get(&pp)).and_then(|q| q.parent)));
+        let Some(session) = session else { continue };
         let mut argv: Vec<&str> = p.cmd.iter().map(String::as_str).collect();
         argv[0] = file_name(argv[0]);
-        let exe = exe_str(p);
-        let server = [p.cmd.get(1).map(|a| stem_of(a)), Some(stem_of(&exe))]
-            .into_iter()
-            .flatten()
-            .find(|n| n.to_lowercase().contains("mcp"))
+        let server = argv[1..]
+            .iter()
+            .rev()
+            .map(|a| stem_of(a))
+            .find(|n| !n.starts_with('-') && (n.contains("mcp") || n.contains("server")))
             .unwrap_or(argv[0])
             .to_string();
         let g = groups.entry(argv.join(" ")).or_insert(McpGroup {
@@ -441,11 +456,7 @@ fn duplicate_mcp(s: &Snapshot, out: &mut Vec<Finding>) {
         });
         g.mem += p.mem;
         g.count += 1;
-        g.sessions.extend(
-            ancestors(p, &s.procs)
-                .into_iter()
-                .filter(|a| live.contains(a)),
-        );
+        g.sessions.insert(session);
     }
     let mut v: Vec<_> = groups
         .into_iter()
@@ -752,31 +763,123 @@ mod tests {
         assert_eq!(f[0].id, finding_id(Category::Process, &format!("10:{OLD}")));
     }
 
-    #[test]
-    fn mcp_under_live_sessions_is_advice() {
-        let claude = |pid| proc(pid, Some(50), "/bin/claude", &["claude"]);
-        let mcp = |pid, parent| {
-            proc(
-                pid,
-                Some(parent),
-                "/opt/node",
-                &["/opt/node", "/x/fetch-mcp.js"],
-            )
-        };
-        let mut s = Snapshot {
-            procs: vec![claude(101), claude(102), mcp(11, 101), mcp(12, 102)],
+    fn dup(procs: Vec<Proc>) -> Vec<Finding> {
+        let s = Snapshot {
+            procs,
             ..Snapshot::default()
         };
-        let f = with_ctx(Os::Macos, |c| findings(c, &s));
+        with_ctx(Os::Macos, |c| findings(c, &s))
+            .into_iter()
+            .filter(|f| f.title.contains("copies of"))
+            .collect()
+    }
+
+    fn sessions() -> Vec<Proc> {
+        vec![
+            proc(101, Some(50), "/bin/claude", &["claude"]),
+            proc(102, Some(50), "/bin/claude", &["claude"]),
+        ]
+    }
+
+    #[test]
+    fn dup_direct_child_without_mcp_in_name() {
+        let mut v = sessions();
+        for (pid, par) in [(11, 101), (12, 102)] {
+            v.push(proc(
+                pid,
+                Some(par),
+                "/opt/node",
+                &[
+                    "node",
+                    "/u/.npm/_npx/ab12/node_modules/.bin/server-sequential-thinking",
+                ],
+            ));
+        }
+        let f = dup(v);
         assert_eq!(f.len(), 1, "{f:?}");
-        assert_eq!(f[0].category, Category::Advice);
-        assert_eq!(f[0].method, Method::None);
-        assert_eq!(f[0].bytes, 200 * MIB);
-        assert_eq!(f[0].title, "2 copies of fetch-mcp under 2 Claude sessions");
-        // one session only: no finding
-        s.procs.pop();
-        s.procs.push(mcp(12, 101));
-        assert!(with_ctx(Os::Macos, |c| findings(c, &s)).is_empty());
+        assert_eq!(
+            f[0].title,
+            "2 copies of server-sequential-thinking under 2 Claude sessions"
+        );
+    }
+
+    #[test]
+    fn dup_npx_wrapper_and_grandchild() {
+        let mut v = sessions();
+        for (w, g, par) in [(11, 21, 101), (12, 22, 102)] {
+            v.push(proc(
+                w,
+                Some(par),
+                "/opt/node",
+                &[
+                    "node",
+                    "/n/npx-cli.js",
+                    "-y",
+                    "@modelcontextprotocol/server-filesystem@latest",
+                    "/p",
+                ],
+            ));
+            v.push(proc(
+                g,
+                Some(w),
+                "/opt/node",
+                &["node", "/n/.bin/mcp-server-filesystem", "/p"],
+            ));
+        }
+        // a third wrapper with a different path must not join the group
+        v.push(proc(
+            13,
+            Some(102),
+            "/opt/node",
+            &["node", "/n/npx-cli.js", "-y", "x", "/other"],
+        ));
+        let f = dup(v);
+        assert_eq!(f.len(), 2, "{f:?}");
+        assert!(f.iter().all(|f| f.title.starts_with("2 copies of")));
+    }
+
+    #[test]
+    fn dup_uvx_python_and_single_session_and_shell() {
+        let mut v = sessions();
+        for (pid, par) in [(11, 101), (12, 102)] {
+            v.push(proc(
+                pid,
+                Some(par),
+                "/u/.local/bin/uvx",
+                &["/u/.local/bin/uvx", "mcp-server-fetch"],
+            ));
+        }
+        assert_eq!(dup(v).len(), 1);
+        // only one session
+        let mut v = sessions();
+        v.push(proc(11, Some(101), "/u/uvx", &["uvx", "mcp-server-fetch"]));
+        v.push(proc(12, Some(101), "/u/uvx", &["uvx", "mcp-server-fetch"]));
+        assert!(dup(v).is_empty());
+        // shells
+        let mut v = sessions();
+        for (pid, par) in [(11, 101), (12, 102)] {
+            v.push(proc(pid, Some(par), "/bin/zsh", &["zsh", "-l"]));
+        }
+        assert!(dup(v).is_empty());
+    }
+
+    #[test]
+    fn native_claude_with_version_exe_is_a_session() {
+        let mut c = proc(
+            101,
+            Some(50),
+            "/Users/u/.local/share/claude/versions/2.1.0",
+            &["claude"],
+        );
+        c.name = "2.1.0".into();
+        assert!(is_claude(&c));
+        let mut c2 = c.clone();
+        c2.pid = 102;
+        let mut v = vec![c, c2];
+        for (pid, par) in [(11, 101), (12, 102)] {
+            v.push(proc(pid, Some(par), "/u/uvx", &["uvx", "mcp-server-fetch"]));
+        }
+        assert_eq!(dup(v).len(), 1);
     }
 
     #[test]
