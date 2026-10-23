@@ -1,0 +1,3 @@
+[{"Type":"volume","Source":"/var/lib/docker/volumes/obs_grafana_data/_data","Destination":"/var/lib/grafana","Mode":"rw","RW":true,"Propagation":"rprivate","Name":"obs_grafana_data","Driver":"local"},{"Type":"bind","Source":"/run/desktop/mnt/host/c/Users/dev/code/obs-config","Destination":"/etc/grafana/provisioning","Mode":"rw","RW":true,"Propagation":"rprivate"}]
+[{"Type":"volume","Source":"/var/lib/docker/volumes/obs_prom_data/_data","Destination":"/prometheus","Mode":"rw","RW":true,"Propagation":"rprivate","Name":"obs_prom_data","Driver":"local"}]
+[{"Type":"volume","Source":"/var/lib/docker/volumes/obs_loki_data/_data","Destination":"/loki","Mode":"rw","RW":true,"Propagation":"rprivate","Name":"obs_loki_data","Driver":"local"}]

@@ -1,0 +1,8 @@
+{"Driver":"local","Labels":"","Links":"N/A","Mountpoint":"","Name":"obs_grafana_data","Scope":"local","Size":"N/A"}
+{"Driver":"local","Labels":"","Links":"N/A","Mountpoint":"","Name":"obs_prom_data","Scope":"local","Size":"N/A"}
+{"Driver":"local","Labels":"","Links":"N/A","Mountpoint":"","Name":"obs_loki_data","Scope":"local","Size":"N/A"}
+{"Driver":"local","Labels":"","Links":"N/A","Mountpoint":"","Name":"shop_pgdata","Scope":"local","Size":"N/A"}
+{"Driver":"local","Labels":"","Links":"N/A","Mountpoint":"","Name":"old_worker_data","Scope":"local","Size":"N/A"}
+{"Driver":"local","Labels":"","Links":"N/A","Mountpoint":"","Name":"scratch_vol","Scope":"local","Size":"N/A"}
+{"Driver":"local","Labels":"","Links":"N/A","Mountpoint":"","Name":"orphan_cache","Scope":"local","Size":"N/A"}
+{"Driver":"local","Labels":"","Links":"N/A","Mountpoint":"","Name":"518335d1cc3dda346b3ecf80feb86f1b4603d9577620ddbbc58b299294b0a332","Scope":"local","Size":"N/A"}

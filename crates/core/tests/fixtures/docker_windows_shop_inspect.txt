@@ -1,0 +1,1 @@
+[{"Type":"bind","Source":"C:\\Users\\dev\\code\\shop","Destination":"/app","Mode":"rw","RW":true,"Propagation":"rprivate"}]

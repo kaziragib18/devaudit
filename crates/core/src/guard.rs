@@ -77,7 +77,7 @@ pub fn normalize_mount(src: &str) -> Option<PathBuf> {
     normalize_mount_for(Os::current(), src)
 }
 
-fn normalize_mount_for(os: Os, src: &str) -> Option<PathBuf> {
+pub(crate) fn normalize_mount_for(os: Os, src: &str) -> Option<PathBuf> {
     match os {
         Os::Macos => src.starts_with('/').then(|| PathBuf::from(src)),
         Os::Windows => {
@@ -182,7 +182,7 @@ pub fn git_ignored(path: &Path, run: &dyn Runner) -> Result<bool, String> {
 
 /// Like `platform::inside`, but when a side can't be resolved it falls back to a
 /// lexical comparison (equal, or below at a component boundary) instead of "not inside".
-fn maybe_inside(child: &Path, parent: &Path) -> bool {
+pub(crate) fn maybe_inside(child: &Path, parent: &Path) -> bool {
     let (c, p) = (platform::canon(child), platform::canon(parent));
     if c.is_ok() && p.is_ok() {
         return platform::inside(child, parent);
@@ -200,7 +200,7 @@ fn maybe_inside(child: &Path, parent: &Path) -> bool {
     })
 }
 
-fn docker_down(stderr: &str) -> bool {
+pub(crate) fn docker_down(stderr: &str) -> bool {
     [
         "Cannot connect to the Docker daemon",
         "Is the docker daemon running",

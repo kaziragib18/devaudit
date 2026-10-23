@@ -1,4 +1,5 @@
 pub mod disk;
+pub mod docker;
 pub mod guard;
 pub mod lock;
 pub mod model;

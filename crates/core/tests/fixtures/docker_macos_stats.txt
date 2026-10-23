@@ -1,0 +1,5 @@
+{"BlockIO":"0B / 0B","CPUPerc":"0.5%","Container":"15f4556b7b62","ID":"15f4556b7b62f0080960791f76639407012838c5d9f766ac2ab92a4c0f8a65c4","MemPerc":"1.2%","MemUsage":"145.3MiB / 7.67GiB","Name":"grafana","NetIO":"1kB / 1kB","PIDs":"10"}
+{"BlockIO":"0B / 0B","CPUPerc":"0.5%","Container":"c0adef3ac471","ID":"c0adef3ac471606e91a56a1c00d86ad30f418028ee4da13b1df1269854aaaf0d","MemPerc":"1.2%","MemUsage":"512MiB / 7.67GiB","Name":"prometheus","NetIO":"1kB / 1kB","PIDs":"10"}
+{"BlockIO":"0B / 0B","CPUPerc":"0.5%","Container":"d124051655d0","ID":"d124051655d0eb1bc0bd293263eb8991bb0e905b6ebf36075235b0117a4b3660","MemPerc":"1.2%","MemUsage":"1.5GiB / 7.67GiB","Name":"loki","NetIO":"1kB / 1kB","PIDs":"10"}
+{"BlockIO":"0B / 0B","CPUPerc":"0.5%","Container":"6bef15131afe","ID":"6bef15131afe9742680fe8176bd87731b50e7d7a122c4087876e1763c7fa4f7b","MemPerc":"1.2%","MemUsage":"220MiB / 7.67GiB","Name":"shop-api","NetIO":"1kB / 1kB","PIDs":"10"}
+{"BlockIO":"0B / 0B","CPUPerc":"0.5%","Container":"0faa287bed03","ID":"0faa287bed03a1a21b536565451adb041127692143944d7bd64defc8ad44df21","MemPerc":"1.2%","MemUsage":"64.2MiB / 7.67GiB","Name":"shop-db","NetIO":"1kB / 1kB","PIDs":"10"}

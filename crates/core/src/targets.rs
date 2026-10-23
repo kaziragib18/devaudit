@@ -533,7 +533,7 @@ fn is_vhdx(p: &Path) -> bool {
 }
 
 /// Every `*.vhdx` under `{localappdata}/Docker/wsl` (never through links).
-fn docker_vhdx(local: &Path) -> Vec<PathBuf> {
+pub(crate) fn docker_vhdx(local: &Path) -> Vec<PathBuf> {
     let mut out = vec![];
     let mut stack = vec![(local.join("Docker").join("wsl"), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
