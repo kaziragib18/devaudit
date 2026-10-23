@@ -8,6 +8,7 @@ pub mod procs;
 pub mod projects;
 pub mod rules;
 pub mod run;
+pub mod targets;
 
 use model::Os;
 use run::Runner;

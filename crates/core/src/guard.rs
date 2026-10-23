@@ -113,7 +113,11 @@ fn normalize_mount_for(os: Os, src: &str) -> Option<PathBuf> {
     }
 }
 
-fn git(run: &dyn Runner, dir: &Path, args: &[&str]) -> Result<crate::run::Output, RunError> {
+pub(crate) fn git(
+    run: &dyn Runner,
+    dir: &Path,
+    args: &[&str],
+) -> Result<crate::run::Output, RunError> {
     let d = dir.to_string_lossy();
     // A scanned repo's config must not be able to run commands (core.fsmonitor), nor may we write to it.
     let mut argv = vec![

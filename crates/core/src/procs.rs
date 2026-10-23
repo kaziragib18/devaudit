@@ -412,7 +412,7 @@ struct McpGroup {
 
 /// A Claude session: `claude` by exe/name/argv[1] stem, or argv[0] file stem (native installs
 /// whose exe is a version number).
-fn is_claude(p: &Proc) -> bool {
+pub(crate) fn is_claude(p: &Proc) -> bool {
     stem_matches(p, &["claude".to_string()])
         || p.cmd
             .first()
