@@ -203,7 +203,17 @@ pub fn graceful_stop(pid: u32) -> Result<(), String> {
 
 pub fn forbidden_roots(d: &KnownDirs) -> ForbiddenRoots {
     ForbiddenRoots {
-        exact: vec![PathBuf::from("/"), d.home.clone()],
+        // Every mounted volume is a drive root.
+        exact: [PathBuf::from("/"), d.home.clone()]
+            .into_iter()
+            .chain(
+                fs::read_dir("/Volumes")
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|e| e.path()),
+            )
+            .collect(),
         system: ["/System", "/Library", "/Applications", "/usr", "/opt"]
             .map(PathBuf::from)
             .into(),
@@ -238,6 +248,14 @@ mod tests {
         assert!(f.exact.contains(&k.home));
         for s in ["/System", "/Library", "/Applications", "/usr", "/opt"] {
             assert!(f.system.contains(&PathBuf::from(s)), "{s}");
+        }
+    }
+
+    #[test]
+    fn forbidden_exact_includes_every_volume() {
+        let f = forbidden_roots(&known_dirs());
+        for e in std::fs::read_dir("/Volumes").unwrap().flatten() {
+            assert!(f.exact.contains(&e.path()), "{:?}", e.path());
         }
     }
 

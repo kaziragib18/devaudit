@@ -8,16 +8,19 @@ use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr;
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, LocalFree};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_MORE_DATA, ERROR_SUCCESS, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+    LocalFree,
+};
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_OFFLINE,
     FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_ID_INFO, FILE_READ_ATTRIBUTES, FileIdInfo, GetDiskFreeSpaceExW,
-    GetFileInformationByHandleEx, GetLogicalDrives, GetVolumePathNameW, MoveFileExW,
-    SetFileAttributesW,
+    FILE_ID_INFO, FILE_READ_ATTRIBUTES, FileIdInfo, FindFirstVolumeW, FindNextVolumeW,
+    FindVolumeClose, GetDiskFreeSpaceExW, GetFileInformationByHandleEx, GetLogicalDrives,
+    GetVolumePathNameW, GetVolumePathNamesForVolumeNameW, MoveFileExW, SetFileAttributesW,
 };
 use windows_sys::Win32::System::ProcessStatus::{GetPerformanceInfo, PERFORMANCE_INFORMATION};
 use windows_sys::Win32::System::Registry::{
@@ -469,6 +472,54 @@ pub fn graceful_stop(_pid: u32) -> Result<(), String> {
     Err("not supported on Windows".into())
 }
 
+/// Every mount path (drive letter or folder mount) of every volume.
+fn volume_mount_paths() -> Vec<PathBuf> {
+    let mut out = vec![];
+    let mut name = [0u16; 64]; // `\\?\Volume{GUID}\` is 49 chars
+    // SAFETY: name is writable for the length passed.
+    let find = unsafe { FindFirstVolumeW(name.as_mut_ptr(), name.len() as u32) };
+    if find == INVALID_HANDLE_VALUE {
+        return out;
+    }
+    loop {
+        let mut buf = vec![0u16; 1024];
+        loop {
+            let mut need = 0u32;
+            // SAFETY: name is NUL-terminated; buf is writable for the length
+            // passed; need is a valid u32.
+            let ok = unsafe {
+                GetVolumePathNamesForVolumeNameW(
+                    name.as_ptr(),
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                    &mut need,
+                )
+            };
+            if ok != 0 {
+                // multi-sz: NUL-separated, ends with an empty string
+                out.extend(
+                    buf.split(|&c| c == 0)
+                        .take_while(|s| !s.is_empty())
+                        .map(|s| PathBuf::from(OsString::from_wide(s))),
+                );
+                break;
+            }
+            // SAFETY: no preconditions.
+            if unsafe { GetLastError() } != ERROR_MORE_DATA || need as usize <= buf.len() {
+                break;
+            }
+            buf = vec![0u16; need as usize];
+        }
+        // SAFETY: find is a valid search handle; name is writable.
+        if unsafe { FindNextVolumeW(find, name.as_mut_ptr(), name.len() as u32) } == 0 {
+            break;
+        }
+    }
+    // SAFETY: find came from FindFirstVolumeW and is closed once.
+    unsafe { FindVolumeClose(find) };
+    out
+}
+
 pub fn forbidden_roots(d: &KnownDirs) -> ForbiddenRoots {
     // SAFETY: no preconditions.
     let mask = unsafe { GetLogicalDrives() };
@@ -476,6 +527,7 @@ pub fn forbidden_roots(d: &KnownDirs) -> ForbiddenRoots {
         .filter(|i| mask & (1 << i) != 0)
         .map(|i| format!("{}:\\", (b'A' + i) as char).into())
         .collect();
+    exact.extend(volume_mount_paths());
     exact.push(d.home.clone());
     let system = [
         (FOLDERID_Windows, "WINDIR"),
@@ -597,6 +649,16 @@ mod tests {
             "{f:?}"
         );
         assert!(f.system.len() >= 4);
+    }
+
+    #[test]
+    fn forbidden_exact_includes_system_drive_root() {
+        let f = forbidden_roots(&known_dirs());
+        let sys = PathBuf::from(format!(r"{}\", std::env::var("SystemDrive").unwrap()));
+        assert!(
+            f.exact.iter().any(|p| crate::platform::eq_ci(p, &sys)),
+            "{f:?}"
+        );
     }
 
     #[test]

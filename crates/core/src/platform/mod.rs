@@ -111,12 +111,24 @@ pub fn eq_ci(a: &Path, b: &Path) -> bool {
 }
 
 /// Canonicalises the deepest existing ancestor and re-appends the rest.
+/// None if any existing component can't be resolved.
 fn canon_lenient(p: &Path) -> Option<PathBuf> {
     let p = std::path::absolute(p).ok()?;
     let comps: Vec<Component> = p.components().collect();
     for i in (1..=comps.len()).rev() {
-        let Ok(mut out) = canon(&comps[..i].iter().collect::<PathBuf>()) else {
-            continue;
+        let head: PathBuf = comps[..i].iter().collect();
+        let mut out = match canon(&head) {
+            Ok(c) => c,
+            // Walk up only past names that truly don't exist. A dangling
+            // link (entry exists, target doesn't), permission denied, a
+            // loop, etc. can't be resolved: fail closed.
+            Err(e)
+                if e.kind() == io::ErrorKind::NotFound
+                    && std::fs::symlink_metadata(&head).is_err() =>
+            {
+                continue;
+            }
+            Err(_) => return None,
         };
         let rest = &comps[i..];
         if !rest.contains(&Component::ParentDir) {
@@ -190,12 +202,13 @@ pub fn volume_of(p: &Path) -> io::Result<u64> {
 
 /// (total, free-to-this-user) bytes of the volume holding `p`.
 pub fn volume_space(p: &Path) -> io::Result<(u64, u64)> {
-    let (total, free) = os_volume_space(p)?;
     #[cfg(test)]
     if let Some(f) = fake::lookup(&fake::FREE, p) {
-        return Ok((total, f));
+        // Total of the nearest existing ancestor; the faked path may not exist.
+        let total = p.ancestors().find_map(|a| os_volume_space(a).ok());
+        return Ok((total.map_or(f, |t| t.0), f));
     }
-    Ok((total, free))
+    os_volume_space(p)
 }
 
 /// Test hook: `volume_of` reports `volume` for `path` and everything below it.
@@ -306,6 +319,36 @@ mod tests {
             &d.path().join("ln/x/notyet"),
             &d.path().join("real")
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inside_fails_closed_on_unresolvable_paths() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("root");
+        fs::create_dir(&root).unwrap();
+        // dangling link: must not be treated as a not-yet-created dir
+        std::os::unix::fs::symlink(d.path().join("missing"), root.join("ln")).unwrap();
+        assert!(!inside(&root.join("ln/x"), &root));
+        assert!(!inside(&root.join("ln"), &root));
+        // permission denied below a dir
+        let locked = root.join("locked");
+        fs::create_dir_all(locked.join("x")).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let r = inside(&locked.join("x/y"), &root);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!r);
+        // a plain not-yet-existing child still works
+        assert!(inside(&root.join("new/deeper"), &root));
+    }
+
+    #[test]
+    fn fake_free_space_works_for_missing_paths() {
+        let d = tempfile::tempdir().unwrap();
+        let ghost = d.path().join("no/such/drive");
+        fake_free_space(&ghost, 5);
+        assert_eq!(volume_space(&ghost.join("x")).unwrap().1, 5);
     }
 
     #[test]
