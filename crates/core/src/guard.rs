@@ -25,6 +25,8 @@ pub struct Guard {
     pub cmd_paths: Vec<(u32, String)>,
     pub unreadable: Vec<(u32, String)>,
     pub mounts: Vec<PathBuf>,
+    /// Docker is up but couldn't be read: every project is locked.
+    pub docker_error: Option<String>,
     pub git_available: bool,
     pub recent_days: u32,
     pub now: SystemTime,
@@ -113,7 +115,17 @@ fn normalize_mount_for(os: Os, src: &str) -> Option<PathBuf> {
 
 fn git(run: &dyn Runner, dir: &Path, args: &[&str]) -> Result<crate::run::Output, RunError> {
     let d = dir.to_string_lossy();
-    let mut argv = vec!["git", "-C", &*d];
+    // A scanned repo's config must not be able to run commands (core.fsmonitor), nor may we write to it.
+    let mut argv = vec![
+        "git",
+        "--no-optional-locks",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.untrackedCache=false",
+        "-C",
+        &*d,
+    ];
     argv.extend_from_slice(args);
     run.run(&argv, T)
 }
@@ -132,7 +144,12 @@ pub fn repo_of(path: &Path, run: &dyn Runner) -> Repo {
             let t = PathBuf::from(o.stdout.trim());
             Repo::Git(platform::canon(&t).unwrap_or(t))
         }
-        Ok(o) if o.stderr.contains("not a git repository") => Repo::NotARepo,
+        Ok(o)
+            if o.stderr
+                .contains("not a git repository (or any of the parent directories)") =>
+        {
+            Repo::NotARepo
+        }
         Ok(o) => Repo::GitFailed(format!("exit {}: {}", o.status, o.stderr.trim())),
         Err(RunError::NotFound(_)) => Repo::GitMissing,
         Err(e) => Repo::GitFailed(format!("{e:?}")),
@@ -159,27 +176,60 @@ pub fn git_ignored(path: &Path, run: &dyn Runner) -> Result<bool, String> {
     Ok(o.stdout.trim().is_empty())
 }
 
-fn docker_mounts(run: &dyn Runner) -> Vec<PathBuf> {
-    let ids = match run.run(&["docker", "ps", "-q"], T) {
-        Ok(o) if o.status == 0 => o.stdout,
-        _ => return vec![],
+/// Like `platform::inside`, but a side that can't be resolved counts as inside (fail closed).
+fn maybe_inside(child: &Path, parent: &Path) -> bool {
+    match (platform::canon(child), platform::canon(parent)) {
+        (Ok(_), Ok(_)) => platform::inside(child, parent),
+        _ => true,
+    }
+}
+
+fn docker_down(stderr: &str) -> bool {
+    [
+        "Cannot connect to the Docker daemon",
+        "Is the docker daemon running",
+        "error during connect",
+        "//./pipe/docker_engine",
+    ]
+    .iter()
+    .any(|m| stderr.contains(m))
+}
+
+/// Bind-mount sources, or Err when Docker is running but can't be read (fail closed).
+/// Docker not installed or not running gives an empty list.
+fn docker_mounts(run: &dyn Runner) -> Result<Vec<PathBuf>, String> {
+    let call = |argv: &[&str]| -> Result<Option<String>, String> {
+        match run.run(argv, T) {
+            Ok(o) if o.status == 0 => Ok(Some(o.stdout)),
+            Ok(o) if docker_down(&o.stderr) => Ok(None),
+            Ok(o) => Err(format!("exit {}: {}", o.status, o.stderr.trim())),
+            Err(RunError::NotFound(_)) => Ok(None),
+            Err(e) => Err(format!("{e:?}")),
+        }
+    };
+    let Some(ids) = call(&["docker", "ps", "-q"])? else {
+        return Ok(vec![]);
     };
     let ids: Vec<&str> = ids.split_whitespace().collect();
     if ids.is_empty() {
-        return vec![];
+        return Ok(vec![]);
     }
     let mut argv = vec!["docker", "inspect", "--format", "{{json .Mounts}}"];
     argv.extend(&ids);
-    let out = match run.run(&argv, T) {
-        Ok(o) if o.status == 0 => o.stdout,
-        _ => return vec![],
+    let Some(out) = call(&argv)? else {
+        return Ok(vec![]);
     };
-    out.lines()
-        .filter_map(|l| serde_json::from_str::<Vec<serde_json::Value>>(l.trim()).ok())
-        .flatten()
-        .filter(|m| m["Type"] == "bind")
-        .filter_map(|m| m["Source"].as_str().and_then(normalize_mount))
-        .collect()
+    let mut mounts = vec![];
+    for l in out.lines().filter(|l| !l.trim().is_empty()) {
+        let v: Vec<serde_json::Value> = serde_json::from_str(l.trim())
+            .map_err(|e| format!("unreadable docker inspect output: {e}"))?;
+        mounts.extend(
+            v.iter()
+                .filter(|m| m["Type"] == "bind")
+                .filter_map(|m| m["Source"].as_str().and_then(normalize_mount)),
+        );
+    }
+    Ok(mounts)
 }
 
 /// `needle` occurs in `hay` ending at a path/word boundary (so `app` doesn't match `app2`).
@@ -219,12 +269,17 @@ impl Guard {
                     .map(|a| (p.pid, normalize_path_text(a)))
             })
             .collect();
+        let (mounts, docker_error) = match docker_mounts(run) {
+            Ok(m) => (m, None),
+            Err(e) => (vec![], Some(e)),
+        };
         Ok(Guard {
             procs: s.procs.clone(),
             cwds,
             cmd_paths,
             unreadable: s.own_cwd_unreadable.clone(),
-            mounts: docker_mounts(run),
+            mounts,
+            docker_error,
             git_available: !matches!(repo_of(Path::new("."), run), Repo::GitMissing),
             recent_days,
             now,
@@ -248,7 +303,7 @@ impl Guard {
         let mut users: Vec<u32> = self
             .cwds
             .iter()
-            .filter(|(_, c)| platform::inside(c, project))
+            .filter(|(_, c)| maybe_inside(c, project))
             .map(|(p, _)| *p)
             .collect();
         let mut needles = vec![normalize_path_text(&project.to_string_lossy())];
@@ -266,11 +321,14 @@ impl Guard {
         for pid in users {
             reasons.push(format!("in use by {} (pid {pid})", self.name(pid)));
         }
+        if let Some(e) = &self.docker_error {
+            reasons.push(format!("Can't check Docker containers: {e}"));
+        }
         // A mount of the project, or of a folder containing it, exposes it to the container.
         if self
             .mounts
             .iter()
-            .any(|m| platform::inside(m, project) || platform::inside(project, m))
+            .any(|m| maybe_inside(m, project) || maybe_inside(project, m))
         {
             reasons.push("Docker container mounts it".into());
         }
@@ -278,29 +336,59 @@ impl Guard {
         let mut commit = None;
         match repo_of(project, run) {
             Repo::Git(top) => {
-                match git(run, &top, &["status", "--porcelain"]) {
+                let st = [
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=normal",
+                    "--ignore-submodules=none",
+                ];
+                match git(run, &top, &st) {
                     Ok(o) if o.status == 0 => {
                         if !o.stdout.trim().is_empty() {
                             reasons.push("uncommitted changes".into());
                         }
                     }
-                    _ => reasons.push("Can't read git status".into()),
+                    Ok(o) => reasons.push(format!(
+                        "Can't read git status: exit {}: {}",
+                        o.status,
+                        o.stderr.trim()
+                    )),
+                    Err(e) => reasons.push(format!("Can't read git status: {e:?}")),
                 }
-                // No commits yet: log fails; idle days then come from file times alone.
-                if let Ok(o) = git(run, &top, &["log", "-1", "--format=%ct"])
-                    && o.status == 0
-                    && let Ok(secs) = o.stdout.trim().parse::<u64>()
-                {
-                    commit = Some(UNIX_EPOCH + Duration::from_secs(secs));
+                // A repo with no commits yet is benign; any other history failure is not.
+                match git(run, &top, &["rev-parse", "--verify", "-q", "HEAD"]) {
+                    Ok(o) if o.status == 1 => {}
+                    _ => match git(run, &top, &["log", "-1", "--format=%ct"]) {
+                        Ok(o) if o.status == 0 => match o.stdout.trim().parse::<u64>() {
+                            Ok(secs) => commit = Some(UNIX_EPOCH + Duration::from_secs(secs)),
+                            Err(_) => reasons.push(format!(
+                                "Can't read git history: unreadable commit time {:?}",
+                                o.stdout.trim()
+                            )),
+                        },
+                        Ok(o) if o.stderr.contains("does not have any commits") => {}
+                        Ok(o) => reasons.push(format!(
+                            "Can't read git history: exit {}: {}",
+                            o.status,
+                            o.stderr.trim()
+                        )),
+                        Err(e) => reasons.push(format!("Can't read git history: {e:?}")),
+                    },
                 }
             }
             Repo::NotARepo => {}
-            Repo::GitMissing | Repo::GitFailed(_) => reasons.push(GIT_MISSING.into()),
+            Repo::GitMissing => reasons.push(GIT_MISSING.into()),
+            Repo::GitFailed(d) => reasons.push(format!("git failed: {d}")),
         }
 
         let mut skip: Vec<&str> = BUILD_DIR_NAMES.to_vec();
         skip.extend([".git", ".devaudit-vault"]);
-        let mtime = disk::usage(project, &skip, &AtomicBool::new(false)).newest_mtime;
+        let walk = platform::canon(project).unwrap_or_else(|_| project.to_path_buf());
+        let usage = disk::usage(&walk, &skip, &AtomicBool::new(false));
+        if !usage.skipped.is_empty() {
+            reasons.push("Couldn't read some folders in the project".into());
+        }
+        let mtime = usage.newest_mtime;
         let idle_days = mtime.into_iter().chain(commit).max().map(|t| {
             let secs = self.now.duration_since(t).unwrap_or_default().as_secs();
             u32::try_from(secs / 86_400).unwrap_or(u32::MAX)
@@ -332,18 +420,14 @@ mod tests {
 
     const DAY: u64 = 86_400;
 
-    fn git_bin() -> PathBuf {
-        ["/usr/bin", "/opt/homebrew/bin", "/usr/local/bin"]
-            .iter()
-            .map(|d| PathBuf::from(d).join(if cfg!(windows) { "git.exe" } else { "git" }))
-            .find(|p| p.exists())
-            .expect("git installed")
-    }
-
     fn real() -> SystemRunner {
         SystemRunner {
-            tool_dirs: vec![git_bin().parent().unwrap().to_path_buf()],
+            tool_dirs: platform::tool_dirs(&platform::known_dirs()),
         }
+    }
+
+    fn git_bin() -> PathBuf {
+        real().resolve("git").expect("git installed")
     }
 
     fn sh(dir: &Path, args: &[&str]) {
@@ -408,8 +492,13 @@ mod tests {
         Guard::build(&snap(procs), &FakeRunner::new(), 14, SystemTime::now()).unwrap()
     }
 
+    /// An existing dir that is not inside any test project.
+    fn elsewhere() -> String {
+        std::env::temp_dir().to_string_lossy().into_owned()
+    }
+
     fn quiet() -> Guard {
-        guard(vec![p(1, "zsh", Some("/nonexistent-elsewhere"), &[])])
+        guard(vec![p(1, "zsh", Some(&elsewhere()), &[])])
     }
 
     #[test]
@@ -468,7 +557,7 @@ mod tests {
         let canon = platform::canon(d.path()).unwrap();
         let arg = format!("{}/node_modules/.bin/next", canon.display());
         let g = guard(vec![
-            p(1, "zsh", Some("/nonexistent-elsewhere"), &[]),
+            p(1, "zsh", Some(&elsewhere()), &[]),
             p(9, "node", None, &[&arg, "dev"]),
         ]);
         let a = g.check(d.path(), &real());
@@ -502,7 +591,7 @@ mod tests {
         let canon = platform::canon(d.path()).unwrap();
         let fwd = format!("{}/x.js", canon.display().to_string().replace('\\', "/"));
         let g = guard(vec![
-            p(1, "cmd", Some(r"C:\nonexistent-elsewhere"), &[]),
+            p(1, "cmd", Some(&elsewhere()), &[]),
             p(9, "node", None, &[&fwd]),
         ]);
         assert!(g.check(d.path(), &real()).locked);
@@ -611,7 +700,7 @@ mod tests {
                 ok(&format!("{json}\n")),
             );
         let g = Guard::build(
-            &snap(vec![p(1, "z", Some("/nonexistent-elsewhere"), &[])]),
+            &snap(vec![p(1, "z", Some(&elsewhere()), &[])]),
             &r,
             14,
             SystemTime::now(),
@@ -697,5 +786,178 @@ mod tests {
             Repo::Git(top) => assert_eq!(top, platform::canon(&wt_path).unwrap()),
             r => panic!("{r:?}"),
         }
+    }
+
+    fn ok(s: &str) -> Result<Output, RunError> {
+        Ok(Output {
+            status: 0,
+            stdout: s.into(),
+            stderr: String::new(),
+        })
+    }
+
+    fn fail(code: i32, err: &str) -> Result<Output, RunError> {
+        Ok(Output {
+            status: code,
+            stdout: String::new(),
+            stderr: err.into(),
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fsmonitor_in_repo_config_is_not_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = old_repo();
+        let marker = d.path().join("MARKER");
+        let script = d.path().join("hook.sh");
+        fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        old(&script);
+        sh(
+            d.path(),
+            &["config", "core.fsmonitor", script.to_str().unwrap()],
+        );
+        let _ = quiet().check(d.path(), &real());
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn git_log_failure_locks_but_no_commits_is_benign() {
+        let d = old_plain();
+        let top = platform::canon(d.path()).unwrap();
+        // Status ok+empty, HEAD verifies, log fails.
+        let pre = [
+            "git",
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.untrackedCache=false",
+            "-C",
+            top.to_str().unwrap(),
+        ];
+        let on = |r: FakeRunner, tail: &[&str], res| {
+            let v: Vec<&str> = pre.iter().chain(tail).copied().collect();
+            r.on(&v, res)
+        };
+        let r = on(
+            FakeRunner::new(),
+            &["rev-parse", "--show-toplevel"],
+            ok(&format!("{}\n", top.display())),
+        );
+        let r = on(r, &["status"], ok(""));
+        let r = on(r, &["rev-parse", "--verify"], ok("abc\n"));
+        let broken = on(r, &["log"], fail(128, "fatal: bad object"));
+        let a = quiet().check(&top, &broken);
+        assert!(
+            a.reasons
+                .iter()
+                .any(|r| r.starts_with("Can't read git history")),
+            "{:?}",
+            a.reasons
+        );
+        // Genuinely no commits: HEAD doesn't verify, log fails with the usual message.
+        let r = on(
+            FakeRunner::new(),
+            &["rev-parse", "--show-toplevel"],
+            ok(&format!("{}\n", top.display())),
+        );
+        let r = on(r, &["status"], ok(""));
+        let r = on(r, &["rev-parse", "--verify"], fail(1, ""));
+        let a = quiet().check(&top, &r);
+        assert!(
+            !a.reasons.iter().any(|r| r.contains("history")),
+            "{:?}",
+            a.reasons
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_subdir_locks() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = old_repo();
+        let sub = d.path().join("locked");
+        fs::create_dir(&sub).unwrap();
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(&sub).is_ok(); // running as root
+        let a = quiet().check(d.path(), &real());
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
+        if !readable {
+            assert!(
+                a.reasons
+                    .contains(&"Couldn't read some folders in the project".to_string()),
+                "{:?}",
+                a.reasons
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_cwd_under_project_locks() {
+        let d = old_repo();
+        let gone = d.path().join("gone/deeper");
+        let g = guard(vec![p(5, "node", Some(gone.to_str().unwrap()), &[])]);
+        let a = g.check(d.path(), &real());
+        assert!(
+            a.reasons.contains(&"in use by node (pid 5)".to_string()),
+            "{:?}",
+            a.reasons
+        );
+    }
+
+    #[test]
+    fn docker_failure_modes() {
+        let s = snap(vec![p(1, "z", Some(&elsewhere()), &[])]);
+        let build = |r: &FakeRunner| Guard::build(&s, r, 14, SystemTime::now()).unwrap();
+        for down in [
+            "Cannot connect to the Docker daemon at unix:///x",
+            "error during connect: open //./pipe/docker_engine",
+        ] {
+            let g = build(&FakeRunner::new().on(&["docker"], fail(1, down)));
+            assert!(g.docker_error.is_none() && g.mounts.is_empty(), "{down}");
+        }
+        for r in [
+            FakeRunner::new().on(&["docker"], Err(RunError::Timeout)),
+            FakeRunner::new().on(&["docker"], fail(1, "permission denied")),
+            FakeRunner::new()
+                .on(&["docker", "ps"], ok("abc\n"))
+                .on(&["docker", "inspect"], ok("not json\n")),
+        ] {
+            let g = build(&r);
+            assert!(g.docker_error.is_some());
+            let d = old_repo();
+            let a = g.check(d.path(), &real());
+            assert!(
+                a.locked
+                    && a.reasons
+                        .iter()
+                        .any(|r| r.starts_with("Can't check Docker containers")),
+                "{:?}",
+                a.reasons
+            );
+        }
+    }
+
+    #[test]
+    fn git_failed_shows_detail() {
+        let d = old_plain();
+        let r = FakeRunner::new().on(&["git"], fail(128, "fatal: broken .git pointer"));
+        assert!(matches!(repo_of(d.path(), &r), Repo::GitFailed(_)));
+        let a = quiet().check(d.path(), &r);
+        assert!(
+            a.reasons
+                .iter()
+                .any(|r| r.starts_with("git failed:") && r.contains("broken")),
+            "{:?}",
+            a.reasons
+        );
+        assert!(!a.reasons.contains(&GIT_MISSING.to_string()));
     }
 }
