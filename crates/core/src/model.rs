@@ -9,11 +9,7 @@ pub enum Os {
 
 impl Os {
     pub fn current() -> Os {
-        if cfg!(windows) {
-            Os::Windows
-        } else {
-            Os::Macos
-        }
+        crate::platform::CURRENT_OS
     }
 }
 

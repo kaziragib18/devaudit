@@ -64,8 +64,14 @@ pub struct SystemRunner {
 
 impl SystemRunner {
     /// Looks only in `tool_dirs`, never the inherited PATH.
+    /// A program containing a path separator or `..` is refused.
     pub fn resolve(&self, program: &str) -> Option<PathBuf> {
-        let names: Vec<String> = if cfg!(windows) {
+        if program.is_empty() || program.contains(['/', '\\']) || program.contains("..") {
+            return None;
+        }
+        let lower = program.to_ascii_lowercase();
+        let has_suffix = [".exe", ".cmd", ".bat"].iter().any(|e| lower.ends_with(e));
+        let names: Vec<String> = if cfg!(windows) && !has_suffix {
             ["exe", "cmd", "bat"]
                 .iter()
                 .map(|e| format!("{program}.{e}"))
@@ -270,6 +276,19 @@ mod fake {
                     ))
                 })
         }
+
+        /// Like SystemRunner's file variants: non-zero exit is an error.
+        fn answer_ok(&self, argv: &[&str]) -> Result<Output, RunError> {
+            let o = self.answer(argv)?;
+            if o.status != 0 {
+                return Err(RunError::Io(format!(
+                    "exit {}: {}",
+                    o.status,
+                    o.stderr.trim_end()
+                )));
+            }
+            Ok(o)
+        }
     }
 
     impl Runner for FakeRunner {
@@ -277,11 +296,20 @@ mod fake {
             self.answer(argv)
         }
         fn run_to_file(&self, argv: &[&str], _: Duration, out: &Path) -> Result<(), RunError> {
-            let o = self.answer(argv)?;
-            std::fs::write(out, o.stdout).map_err(|e| RunError::Io(e.to_string()))
+            let o = self.answer_ok(argv)?;
+            let io = |e: std::io::Error| RunError::Io(e.to_string());
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(out)
+                .map_err(io)?;
+            f.write_all(o.stdout.as_bytes()).map_err(|e| {
+                let _ = std::fs::remove_file(out);
+                io(e)
+            })
         }
         fn run_from_file(&self, argv: &[&str], _: Duration, _: &Path) -> Result<Output, RunError> {
-            self.answer(argv)
+            self.answer_ok(argv)
         }
     }
 
@@ -306,6 +334,48 @@ mod fake {
                 Err(RunError::NotFound(_))
             ));
             assert_eq!(f.calls(), vec![vec!["docker", "ps", "-a"], vec!["git"]]);
+        }
+
+        fn out(status: i32) -> Output {
+            Output {
+                status,
+                stdout: "data".into(),
+                stderr: "boom\n".into(),
+            }
+        }
+
+        #[test]
+        fn fake_file_variants_fail_on_nonzero_exit() {
+            let d = tempfile::tempdir().unwrap();
+            let f = FakeRunner::new().on(&["x"], Ok(out(2)));
+            let p = d.path().join("o");
+            assert_eq!(
+                f.run_to_file(&["x"], Duration::from_secs(1), &p),
+                Err(RunError::Io("exit 2: boom".into()))
+            );
+            assert!(!p.exists());
+            assert_eq!(
+                f.run_from_file(&["x"], Duration::from_secs(1), &p),
+                Err(RunError::Io("exit 2: boom".into()))
+            );
+            // plain run still returns the Output
+            assert_eq!(f.run(&["x"], Duration::from_secs(1)), Ok(out(2)));
+        }
+
+        #[test]
+        fn fake_run_to_file_refuses_existing_file() {
+            let d = tempfile::tempdir().unwrap();
+            let p = d.path().join("o");
+            std::fs::write(&p, "keep").unwrap();
+            let f = FakeRunner::new().on(&["x"], Ok(out(0)));
+            assert!(matches!(
+                f.run_to_file(&["x"], Duration::from_secs(1), &p),
+                Err(RunError::Io(_))
+            ));
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), "keep");
+            let q = d.path().join("q");
+            f.run_to_file(&["x"], Duration::from_secs(1), &q).unwrap();
+            assert_eq!(std::fs::read_to_string(&q).unwrap(), "data");
         }
     }
 }

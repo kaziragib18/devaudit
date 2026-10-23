@@ -140,3 +140,29 @@ fn cmd_shim_resolved_and_metacharacters_not_executed() {
         }
     }
 }
+
+#[test]
+fn resolve_rejects_paths_in_program_name() {
+    // target/debug/echo-args: "debug/echo-args" under target/ would otherwise resolve.
+    let helper = Path::new(env!("CARGO_BIN_EXE_echo-args"));
+    let debug = helper.parent().unwrap();
+    let r = SystemRunner {
+        tool_dirs: vec![debug.parent().unwrap().into(), debug.join("deps")],
+    };
+    assert_eq!(r.resolve("debug/echo-args"), None);
+    assert_eq!(r.resolve("debug\\echo-args"), None);
+    assert_eq!(r.resolve("../echo-args"), None);
+    assert_eq!(r.resolve(".."), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn resolve_accepts_explicit_windows_suffix() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("t.cmd"), "@echo x\r\n").unwrap();
+    let r = SystemRunner {
+        tool_dirs: vec![d.path().to_path_buf()],
+    };
+    assert_eq!(r.resolve("t.cmd"), Some(d.path().join("t.cmd")));
+    assert_eq!(r.resolve("T.CMD"), Some(d.path().join("T.CMD")));
+}
