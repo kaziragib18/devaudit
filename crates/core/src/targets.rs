@@ -164,13 +164,16 @@ pub fn target_findings(ctx: &Ctx, cancel: &AtomicBool) -> (Vec<Finding>, Vec<Ski
             continue;
         }
         let u = disk::usage(&path, &[], cancel);
+        // A walk that couldn't see everything can't vouch for the size, age or contents.
+        let incomplete = u.cancelled || !u.skipped.is_empty();
         skipped.extend(u.skipped);
         f.bytes = u.bytes;
         f.idle_days = u.newest_mtime.map(|m| days_between(ctx.now, m));
-        (f.tier, f.reason, f.method) = match vet_target(ctx, t, &path, f.idle_days, &cfg) {
-            Ok(v) => v,
-            Err(why) => (Tier::Protected, why, Method::None),
-        };
+        (f.tier, f.reason, f.method) =
+            match vet_target(ctx, t, &path, f.idle_days, incomplete, &cfg) {
+                Ok(v) => v,
+                Err(why) => (Tier::Protected, why, Method::None),
+            };
         out.push(f);
     }
     (out, skipped)
@@ -182,21 +185,30 @@ fn vet_target(
     t: &Target,
     path: &Path,
     idle: Option<u32>,
+    incomplete: bool,
     cfg: &never::NeverCfg,
 ) -> Result<(Tier, String, Method), String> {
     if let Some(why) = never::forbidden(path, cfg) {
         return Err(why);
     }
+    if incomplete {
+        return Err("Couldn't read all of this folder, so it can't be checked".into());
+    }
     let mut tier = t.tier;
     let mut reason = "Rebuilt automatically when needed".to_string();
-    if idle.is_some_and(|d| d < t.min_idle_days) {
+    // Unknown age counts as recent.
+    let recent = match idle {
+        Some(d) => d < t.min_idle_days,
+        None => t.min_idle_days > 0,
+    };
+    if recent {
         tier = raise(tier);
         reason = format!("Used within the last {} days", t.min_idle_days);
     }
     if t.method == TargetMethod::Report {
         return Ok((tier, "Shown for information only".into(), Method::None));
     }
-    if t.method == TargetMethod::Vault && t.tier == Tier::Review {
+    if t.method == TargetMethod::Vault && tier == Tier::Review {
         match never::find_secret_inside(path, SECRET_WALK_LIMIT) {
             Ok(None) => {}
             Ok(Some(hit)) => return Err(format!("Contains {}", hit.display())),
@@ -372,13 +384,14 @@ fn secret_in_worktree(wt: &Path) -> Result<Option<PathBuf>, String> {
     let rd = fs::read_dir(wt).map_err(|e| format!("cannot read {}: {e}", wt.display()))?;
     for e in rd {
         let e = e.map_err(|e| format!("cannot read {}: {e}", wt.display()))?;
-        if e.file_name() == ".git" {
+        let md = fs::symlink_metadata(e.path()).map_err(|e| e.to_string())?;
+        // Only the gitdir pointer file is expected; a `.git` directory is a repo of its own.
+        if e.file_name() == ".git" && md.is_file() {
             continue;
         }
         if name_is_secret(&e.file_name()) {
             return Ok(Some(e.path()));
         }
-        let md = fs::symlink_metadata(e.path()).map_err(|e| e.to_string())?;
         if md.is_dir()
             && !platform::is_link(&md)
             && let Some(hit) = never::find_secret_inside(&e.path(), SECRET_WALK_LIMIT)?
@@ -513,29 +526,61 @@ fn squash(s: &str) -> String {
         .to_lowercase()
 }
 
-/// The distro's `ext4.vhdx`: a Store package whose name contains the distro name, or Docker's.
-fn find_vhdx(ctx: &Ctx, distro: &str) -> Option<PathBuf> {
-    let local = ctx.dirs.local_app_data.as_deref()?;
-    let want = squash(distro);
-    if want.starts_with("dockerdesktop") {
-        let wsl = local.join("Docker").join("wsl");
-        return ["main", "data", "distro", "disk"]
-            .iter()
-            .filter_map(|d| fs::read_dir(wsl.join(d)).ok())
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .find(|p| {
-                p.extension()
-                    .is_some_and(|x| x.eq_ignore_ascii_case("vhdx"))
-            });
+fn is_vhdx(p: &Path) -> bool {
+    p.extension()
+        .is_some_and(|x| x.eq_ignore_ascii_case("vhdx"))
+        && fs::symlink_metadata(p).is_ok_and(|m| m.is_file() && !platform::is_link(&m))
+}
+
+/// Every `*.vhdx` under `{localappdata}/Docker/wsl` (never through links).
+fn docker_vhdx(local: &Path) -> Vec<PathBuf> {
+    let mut out = vec![];
+    let mut stack = vec![(local.join("Docker").join("wsl"), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(md) = fs::symlink_metadata(&p) else {
+                continue;
+            };
+            if platform::is_link(&md) {
+                continue;
+            }
+            if md.is_dir() && depth < MAX_DEPTH {
+                stack.push((p, depth + 1));
+            } else if is_vhdx(&p) {
+                out.push(p);
+            }
+        }
     }
-    fs::read_dir(local.join("Packages"))
+    out.sort();
+    out
+}
+
+/// The package's own name: `Publisher.Name_hash` gives `Name`.
+fn package_name(dir_name: &str) -> &str {
+    let n = dir_name.split_once('.').map_or(dir_name, |(_, r)| r);
+    n.rsplit_once('_').map_or(n, |(l, _)| l)
+}
+
+/// A distro's `ext4.vhdx` in a Store package: an exact package-name match first, then a
+/// substring match. Images in `taken` are never handed out again.
+fn distro_vhdx(local: &Path, distro: &str, taken: &[PathBuf]) -> Option<PathBuf> {
+    let want = squash(distro);
+    let mut pkgs: Vec<(bool, PathBuf)> = fs::read_dir(local.join("Packages"))
         .ok()?
         .flatten()
-        .filter(|e| squash(&e.file_name().to_string_lossy()).contains(&want))
-        .map(|e| e.path().join("LocalState").join("ext4.vhdx"))
-        .find(|p| fs::symlink_metadata(p).is_ok_and(|m| m.is_file() && !platform::is_link(&m)))
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let full = squash(&name);
+            let exact = squash(package_name(&name)) == want;
+            (exact || full.contains(&want)).then(|| (!exact, e.path()))
+        })
+        .collect();
+    pkgs.sort();
+    pkgs.into_iter()
+        .map(|(_, p)| p.join("LocalState").join("ext4.vhdx"))
+        .find(|p| is_vhdx(p) && !taken.iter().any(|t| platform::eq_ci(t, p)))
 }
 
 fn advice(key: &str, title: String, bytes: u64, reason: String) -> Finding {
@@ -570,21 +615,52 @@ pub fn wsl_findings(ctx: &Ctx) -> Vec<Finding> {
         .and_then(|()| fs::read(&tmp).ok());
     let _ = fs::remove_file(&tmp);
     let distros = bytes.map(|b| parse_wsl_list(&b)).unwrap_or_default();
-    let mut out = vec![];
-    for (name, state, version) in distros {
-        let Some(vhdx) = find_vhdx(ctx, &name) else {
-            continue;
-        };
-        let mut f = finding_for(
-            Category::Advice,
-            &vhdx,
-            format!("WSL {name} disk image"),
-            Some(vhdx.clone()),
-        );
+    wsl_images(ctx, &distros)
+}
+
+fn wsl_images(ctx: &Ctx, distros: &[(String, String, u8)]) -> Vec<Finding> {
+    let Some(local) = ctx.dirs.local_app_data.as_deref() else {
+        return vec![];
+    };
+    // Each image once, keyed by its canonical path.
+    let seen = std::cell::RefCell::new(Vec::<PathBuf>::new());
+    let mut out: Vec<Finding> = vec![];
+    let mut add = |vhdx: PathBuf, title: String, reason: String| {
+        let key = platform::canon(&vhdx).unwrap_or_else(|_| vhdx.clone());
+        if seen.borrow().iter().any(|s| platform::eq_ci(s, &key)) {
+            return;
+        }
+        seen.borrow_mut().push(key);
+        let mut f = finding_for(Category::Advice, &vhdx, title, Some(vhdx.clone()));
         f.bytes = fs::symlink_metadata(&vhdx).map_or(0, |m| platform::size_on_disk(&m));
         f.tier = Tier::Review;
-        f.reason = format!("{state}, WSL {version}. DevAudit only reports its size");
+        f.reason = reason;
         out.push(f);
+    };
+    for v in docker_vhdx(local) {
+        let name = v
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        add(
+            v,
+            format!("Docker Desktop WSL disk image ({name})"),
+            "DevAudit only reports its size".into(),
+        );
+    }
+    for (name, state, version) in distros {
+        if squash(name).starts_with("dockerdesktop") {
+            continue;
+        }
+        let taken = seen.borrow().clone();
+        if let Some(v) = distro_vhdx(local, name, &taken) {
+            add(
+                v,
+                format!("WSL {name} disk image"),
+                format!("{state}, WSL {version}. DevAudit only reports its size"),
+            );
+        }
     }
     if !out.is_empty() {
         out.push(advice(
@@ -623,6 +699,21 @@ struct McpConfig {
     top: McpServers,
     #[serde(default)]
     projects: BTreeMap<String, McpServers>,
+}
+
+/// Project roots, repos and build-dir projects under them: where a `.mcp.json` may live.
+fn project_dirs(ctx: &Ctx) -> Vec<PathBuf> {
+    let (roots, _) = projects::roots(ctx);
+    let mut dirs = roots.clone();
+    dirs.extend(find_repos(&roots));
+    dirs.extend(
+        projects::discover(&roots, &ctx.rules.build_dirs, MAX_DEPTH)
+            .into_iter()
+            .map(|b| b.project),
+    );
+    dirs.sort();
+    dirs.dedup();
+    dirs
 }
 
 /// Count of `pkg@latest` arguments over all servers in the MCP config at `path`.
@@ -671,16 +762,15 @@ pub fn advice_findings(ctx: &Ctx, _mem: &MemInfo) -> Vec<Finding> {
     }
     let mut specs = BTreeMap::new();
     latest_specs(&ctx.home.join(".claude.json"), &mut specs);
-    let (roots, _) = projects::roots(ctx);
-    for r in &roots {
-        latest_specs(&r.join(".mcp.json"), &mut specs);
+    for d in project_dirs(ctx) {
+        latest_specs(&d.join(".mcp.json"), &mut specs);
     }
-    for (spec, n) in specs.into_iter().filter(|(_, n)| *n >= 2) {
+    for (spec, n) in specs {
         out.push(advice(
             &format!("mcp-latest:{spec}"),
-            format!("{spec} is set up {n} times"),
+            format!("{spec} is used by {n} MCP server setting{}", if n == 1 { "" } else { "s" }),
             0,
-            "@latest makes npx fetch fresh copies, which fill the npm cache. Pin a version in the MCP settings.".into(),
+            "@latest makes npx look for a new version on every start, and each new version or session can add another folder under ~/.npm/_npx. Pin a version in the MCP settings.".into(),
         ));
     }
     match ctx.os {
@@ -1219,5 +1309,166 @@ mod tests {
                 .iter()
                 .any(|t| t.contains("Windows Update"))
         );
+    }
+
+    #[test]
+    fn unknown_age_fails_closed() {
+        let e = Env::new();
+        let t = e
+            .rules
+            .targets
+            .iter()
+            .find(|t| t.id == e.chrome_id())
+            .unwrap();
+        let d = rules::expand(&t.path, &e.dirs, None).unwrap();
+        fs::create_dir_all(d.join("empty")).unwrap();
+        let (f, _) = target_findings(&e.ctx(), &AtomicBool::new(false));
+        assert_eq!(f[0].tier, Tier::Protected, "{:?}", f[0]);
+        assert_eq!(f[0].method, Method::None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_part_makes_target_protected_and_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+        let e = Env::new();
+        let (id, title) = if Os::current() == Os::Macos {
+            ("playwright-macos", "Playwright")
+        } else {
+            ("playwright-windows", "Playwright")
+        };
+        let d = e.target(id, "f");
+        let locked = d.join("locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let (f, s) = target_findings(&e.ctx(), &AtomicBool::new(false));
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        if fs::read_dir(&locked).is_ok() {
+            return; // running as root: nothing is unreadable
+        }
+        let x = f.iter().find(|x| x.title.contains(title)).unwrap();
+        assert_eq!(x.tier, Tier::Protected, "{x:?}");
+        assert_eq!(x.method, Method::None);
+        assert!(s.iter().any(|k| k.path == locked), "{s:?}");
+    }
+
+    #[test]
+    fn safe_target_raised_to_review_gets_secret_scan() {
+        let mut e = Env::new();
+        let id = if Os::current() == Os::Macos {
+            "playwright-macos"
+        } else {
+            "playwright-windows"
+        };
+        e.rules
+            .targets
+            .iter_mut()
+            .find(|t| t.id == id)
+            .unwrap()
+            .min_idle_days = 7;
+        let d = e.target(id, "f");
+        write_old(&d.join("fresh"), "x", 0);
+        let (f, _) = target_findings(&e.ctx(), &AtomicBool::new(false));
+        assert_eq!(f[0].tier, Tier::Review, "{:?}", f[0]);
+        write_old(&d.join("sub/Login Data"), "x", 30);
+        let (f, _) = target_findings(&e.ctx(), &AtomicBool::new(false));
+        assert_eq!(f[0].tier, Tier::Protected, "{:?}", f[0]);
+        assert!(f[0].reason.contains("Login Data"), "{}", f[0].reason);
+    }
+
+    #[test]
+    fn only_a_git_file_is_exempt_in_a_worktree() {
+        let t = tempfile::tempdir().unwrap();
+        fs::write(t.path().join(".git"), "gitdir: x").unwrap();
+        fs::write(t.path().join("a.txt"), "x").unwrap();
+        assert_eq!(secret_in_worktree(t.path()), Ok(None));
+        fs::remove_file(t.path().join(".git")).unwrap();
+        fs::create_dir(t.path().join(".git")).unwrap();
+        assert_eq!(
+            secret_in_worktree(t.path()),
+            Ok(Some(t.path().join(".git")))
+        );
+    }
+
+    fn touch(p: &Path, s: &str) {
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, s).unwrap();
+    }
+
+    #[test]
+    fn wsl_images_are_unique_and_matched_exactly() {
+        let e = Env::new();
+        let l = e.dirs.local_app_data.clone().unwrap();
+        touch(&l.join("Docker/wsl/main/ext4.vhdx"), "1");
+        touch(&l.join("Docker/wsl/disk/docker_data.vhdx"), "22");
+        let pk = |n: &str| l.join("Packages").join(n).join("LocalState/ext4.vhdx");
+        touch(&pk("CanonicalGroupLimited.Ubuntu_abc"), "333");
+        touch(&pk("CanonicalGroupLimited.Ubuntu22.04LTS_abc"), "4444");
+        let d = |n: &str| (n.to_string(), "Stopped".to_string(), 2u8);
+        let distros = [
+            d("docker-desktop"),
+            d("docker-desktop-data"),
+            d("Ubuntu"),
+            d("Ubuntu-22.04"),
+        ];
+        let f = wsl_images(&e.ctx_with(Os::Windows, &e.run), &distros);
+        let paths: Vec<_> = f.iter().filter_map(|x| x.path.clone()).collect();
+        assert_eq!(paths.len(), 4, "{paths:?}");
+        let mut ids: Vec<_> = f.iter().map(|x| x.id.clone()).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), f.len(), "duplicate ids");
+        assert!(paths.contains(&l.join("Docker/wsl/disk/docker_data.vhdx")));
+        assert!(paths.contains(&l.join("Docker/wsl/main/ext4.vhdx")));
+        let ubuntu = f
+            .iter()
+            .find(|x| x.title == "WSL Ubuntu disk image")
+            .unwrap();
+        assert_eq!(ubuntu.path, Some(pk("CanonicalGroupLimited.Ubuntu_abc")));
+        let u22 = f.iter().find(|x| x.title.contains("Ubuntu-22.04")).unwrap();
+        assert_eq!(
+            u22.path,
+            Some(pk("CanonicalGroupLimited.Ubuntu22.04LTS_abc"))
+        );
+        assert!(
+            f.iter()
+                .any(|x| x.id == finding_id(Category::Advice, "wsl-compact"))
+        );
+    }
+
+    #[test]
+    fn one_vhdx_is_never_given_to_two_distros() {
+        let e = Env::new();
+        let l = e.dirs.local_app_data.clone().unwrap();
+        touch(
+            &l.join("Packages/Vendor.Debian_x/LocalState/ext4.vhdx"),
+            "1",
+        );
+        let d = |n: &str| (n.to_string(), "Running".to_string(), 2u8);
+        let f = wsl_images(
+            &e.ctx_with(Os::Windows, &e.run),
+            &[d("Debian"), d("debian")],
+        );
+        assert_eq!(f.iter().filter(|x| x.path.is_some()).count(), 1);
+    }
+
+    #[test]
+    fn single_latest_mcp_arg_advised_including_nested_project() {
+        let e = Env::new();
+        let nested = e.root.join("a/b/proj");
+        fs::create_dir_all(nested.join(".git")).unwrap();
+        fs::write(
+            nested.join(".mcp.json"),
+            r#"{"mcpServers":{"x":{"command":"npx","args":["-y","@scope/srv@latest"],"env":{"K":"sk-LEAK"}}}}"#,
+        )
+        .unwrap();
+        let f = advice_findings(&e.ctx_with(Os::Macos, &e.run), &mem());
+        let a = f
+            .iter()
+            .find(|x| x.title.contains("@scope/srv@latest"))
+            .unwrap();
+        assert!(a.title.contains("1 MCP server setting"), "{}", a.title);
+        assert!(a.reason.contains("_npx"));
+        assert!(!serde_json::to_string(&f).unwrap().contains("LEAK"));
     }
 }
