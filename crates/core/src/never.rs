@@ -149,7 +149,10 @@ fn resolved(p: &Path) -> Option<PathBuf> {
     }
 }
 
-fn never_prefixes(d: &KnownDirs) -> Vec<(String, PathBuf)> {
+const UNRESOLVED: &str = "can't resolve protected folders";
+
+/// None if a Windows `{appdata}` / `{localappdata}` token can't be expanded.
+fn never_prefixes(d: &KnownDirs) -> Option<Vec<(String, PathBuf)>> {
     let mut v: Vec<(String, PathBuf)> = NEVER_HOME_COMMON
         .iter()
         .map(|r| (r.to_string(), d.home.join(r)))
@@ -169,30 +172,50 @@ fn never_prefixes(d: &KnownDirs) -> Vec<(String, PathBuf)> {
                 } else {
                     (Some(&d.home), *r)
                 };
-                if let Some(b) = base {
-                    v.push((r.to_string(), b.join(rest)));
-                }
+                v.push((r.to_string(), base?.join(rest)));
             }
         }
     }
-    v
+    Some(v)
 }
 
-/// Never-touch home path, or cloud sync root, or overlay entry containing `p`.
-fn never_path_hit(p: &Path, d: &KnownDirs, extra: &[PathBuf]) -> Option<String> {
-    if let Some((r, _)) = never_prefixes(d)
+/// `p` is inside, or contains, a never-touch home path, overlay entry, cloud
+/// sync root or DevAudit data (`own`: data dir, existing project vaults).
+fn never_path_hit(p: &Path, d: &KnownDirs, extra: &[PathBuf], own: &[PathBuf]) -> Option<String> {
+    let Some(prefixes) = never_prefixes(d) else {
+        return Some(UNRESOLVED.into());
+    };
+    let named = prefixes
         .iter()
-        .find(|(_, q)| platform::inside(p, q))
-    {
-        return Some(format!("never-touch: {r}"));
+        .map(|(r, q)| (format!("never-touch: {r}"), q))
+        .chain(
+            extra
+                .iter()
+                .map(|q| ("never-touch: overlay".to_string(), q)),
+        )
+        .chain(
+            d.cloud_roots
+                .iter()
+                .map(|q| ("never-touch: cloud sync folder".to_string(), q)),
+        );
+    for (reason, q) in named {
+        if platform::inside(p, q) {
+            return Some(reason);
+        }
+        if platform::inside(q, p) {
+            return Some("contains a protected folder".into());
+        }
     }
-    if extra.iter().any(|q| platform::inside(p, q)) {
-        return Some("never-touch: overlay".into());
-    }
-    d.cloud_roots
-        .iter()
-        .any(|q| platform::inside(p, q))
-        .then(|| "never-touch: cloud sync folder".into())
+    own.iter()
+        .any(|q| platform::inside(q, p))
+        .then(|| "contains DevAudit's own data".into())
+}
+
+/// First secret-named component of `p` below `skip` components.
+fn secret_component(p: &Path, skip: usize) -> bool {
+    p.components()
+        .skip(skip)
+        .any(|c| name_is_secret(c.as_os_str()))
 }
 
 pub fn forbidden(path: &Path, cfg: &NeverCfg) -> Option<String> {
@@ -229,22 +252,32 @@ pub fn forbidden(path: &Path, cfg: &NeverCfg) -> Option<String> {
     let Some((root, rroot)) = root else {
         return Some("outside home and project roots".into());
     };
-    let skip = rroot.components().count();
-    if rp.components().count() < skip + 2 {
+    if rp.components().count() < rroot.components().count() + 2 {
         return Some("too shallow".into());
     }
 
-    // 3: secret name below the root.
-    if rp
-        .components()
-        .skip(skip)
-        .any(|c| name_is_secret(c.as_os_str()))
-    {
+    // 3: secret name anywhere below home; outside home, anywhere at all.
+    let Some(rhome) = resolved(&d.home) else {
+        return Some("cannot resolve path".into());
+    };
+    let skip = if platform::inside(path, &d.home) {
+        rhome.components().count()
+    } else {
+        0
+    };
+    if secret_component(&rp, skip) {
         return Some("contains a secret file name".into());
     }
 
     // 4
-    if let Some(r) = never_path_hit(path, d, cfg.extra_never) {
+    let mut owned = vec![cfg.data_dir.to_path_buf()];
+    for r in &roots {
+        let v = r.join(".devaudit-vault");
+        if std::fs::symlink_metadata(&v).is_ok() {
+            owned.push(v);
+        }
+    }
+    if let Some(r) = never_path_hit(path, d, cfg.extra_never, &owned) {
         return Some(r);
     }
 
@@ -281,9 +314,9 @@ pub fn forbidden(path: &Path, cfg: &NeverCfg) -> Option<String> {
 }
 
 pub fn valid_project_root(root: &Path, d: &KnownDirs) -> Result<(), String> {
-    if platform::canon(root).is_err() {
+    let Ok(rroot) = platform::canon(root) else {
         return Err("folder not found".into());
-    }
+    };
     let f = platform::forbidden_roots(d);
     // `inside(e, root)`: the root equals or contains `e`.
     if f.exact.iter().any(|e| platform::inside(e, root)) {
@@ -295,7 +328,14 @@ pub fn valid_project_root(root: &Path, d: &KnownDirs) -> Result<(), String> {
     {
         return Err("system folder".into());
     }
-    if let Some(r) = never_path_hit(root, d, &[]) {
+    let skip = match resolved(&d.home) {
+        Some(h) if platform::inside(root, &d.home) => h.components().count(),
+        _ => 0,
+    };
+    if secret_component(&rroot, skip) {
+        return Err("contains a secret file name".into());
+    }
+    if let Some(r) = never_path_hit(root, d, &[], &[platform::data_dir(d)]) {
         return Err(r);
     }
     if platform::is_mount_point(root) {
@@ -304,14 +344,18 @@ pub fn valid_project_root(root: &Path, d: &KnownDirs) -> Result<(), String> {
     Ok(())
 }
 
-/// First secret-named path below `dir`. Never follows links; any unreadable
-/// directory or more than `max_entries` entries is an error (fail closed).
+/// First secret-named path below `dir`. Never follows links; an unreadable
+/// or cloud-placeholder directory, or more than `max_entries` entries, is an
+/// error (fail closed).
 pub fn find_secret_inside(dir: &Path, max_entries: usize) -> Result<Option<PathBuf>, String> {
     let (mut stack, mut seen) = (vec![dir.to_path_buf()], 0usize);
     while let Some(d) = stack.pop() {
-        let rd = std::fs::read_dir(&d).map_err(|e| format!("cannot read {}: {e}", d.display()))?;
-        for ent in rd {
-            let ent = ent.map_err(|e| format!("cannot read {}: {e}", d.display()))?;
+        let err = |e: std::io::Error| format!("cannot read {}: {e}", d.display());
+        if platform::is_cloud_placeholder(&std::fs::symlink_metadata(&d).map_err(err)?) {
+            return Err(format!("{} is not downloaded", d.display()));
+        }
+        for ent in std::fs::read_dir(&d).map_err(err)? {
+            let ent = ent.map_err(err)?;
             seen += 1;
             if seen > max_entries {
                 return Err("too many files to check".into());
@@ -320,8 +364,7 @@ pub fn find_secret_inside(dir: &Path, max_entries: usize) -> Result<Option<PathB
             if name_is_secret(&ent.file_name()) {
                 return Ok(Some(p));
             }
-            let md = std::fs::symlink_metadata(&p)
-                .map_err(|e| format!("cannot read {}: {e}", p.display()))?;
+            let md = std::fs::symlink_metadata(&p).map_err(err)?;
             if md.is_dir() && !platform::is_link(&md) {
                 stack.push(p);
             }
@@ -702,5 +745,124 @@ mod tests {
             return;
         }
         assert_eq!(find_secret_inside(&c, 100).unwrap(), None);
+    }
+
+    #[test]
+    fn secret_named_root_components_are_rejected() {
+        let e = env();
+        let git_root = e.mk("code/.git");
+        assert!(valid_project_root(&git_root, &e.dirs).is_err());
+        let outside = e.base.join("w/.env/proj");
+        fs::create_dir_all(&outside).unwrap();
+        assert!(valid_project_root(&outside, &e.dirs).is_err());
+        // below home even a secret-named dir above the chosen root is caught
+        e.mk("Dev/.git/objects/pack");
+        let roots = [e.dirs.home.join("Dev/.git")];
+        let c = e.cfg(&roots, &[]);
+        assert!(forbidden(&e.dirs.home.join("Dev/.git/objects/pack"), &c).is_some());
+        // outside home: every component counts
+        let ok = e.base.join("w2/proj/a/b");
+        fs::create_dir_all(&ok).unwrap();
+        let roots = [e.base.join("w2/proj")];
+        assert_eq!(forbidden(&ok, &e.cfg(&roots, &[])), None);
+        let bad = e.base.join("w3/token/proj/a/b");
+        fs::create_dir_all(&bad).unwrap();
+        let roots = [e.base.join("w3/token/proj")];
+        assert!(forbidden(&bad, &e.cfg(&roots, &[])).is_some());
+    }
+
+    #[test]
+    fn ancestors_of_protected_locations_are_forbidden() {
+        let mut e = env();
+        e.mk("a/b/c");
+        e.mk("Sync/deep");
+        e.mk("proj/inner/x");
+        e.mk("Library/Containers/com.docker.docker");
+        e.mk("Library/Application Support/com.apple.TCC");
+        e.mk(".config/gh");
+        e.mk(".devaudit/vault.noindex");
+        e.mk("AppData/Local/Packages");
+        e.mk("AppData/Roaming/Microsoft/Protect");
+        e.dirs.cloud_roots = vec![e.dirs.home.join("proj/inner")];
+        let h = e.dirs.home.clone();
+        for p in ["proj/inner/..", ".config/gh"] {
+            assert!(e.check(&h.join(p)).is_some(), "{p}");
+        }
+        // an ancestor of a cloud root
+        assert!(e.check(&h.join("proj")).is_some());
+        let extra = [h.join("a/b/c")];
+        assert!(forbidden(&h.join("a/b"), &e.cfg(&[], &extra)).is_some());
+        // a dir containing the data dir
+        let mut e2 = env();
+        e2.data = e2.dirs.home.join("hold/data/.devaudit");
+        fs::create_dir_all(&e2.data).unwrap();
+        assert!(e2.check(&e2.dirs.home.join("hold/data")).is_some());
+        // a project root containing a cloud root or the data dir is invalid
+        assert!(valid_project_root(&h.join("proj"), &e.dirs).is_err());
+        assert!(valid_project_root(&h.join("a"), &e.dirs).is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn library_containers_ancestor_forbidden_on_macos() {
+        let e = env();
+        e.mk("Library/Containers/com.docker.docker/x");
+        e.mk("Library/Group Containers/group.com.docker");
+        e.mk("Library/Application Support/com.apple.TCC");
+        for p in [
+            "Library/Containers",
+            "Library/Group Containers",
+            "Library/Application Support",
+        ] {
+            assert!(e.check(&e.dirs.home.join(p)).is_some(), "{p}");
+        }
+        assert!(valid_project_root(&e.dirs.home.join("Library/Containers"), &e.dirs).is_err());
+        let v = e.base.join("work");
+        fs::create_dir_all(v.join(".devaudit-vault/e")).unwrap();
+        let roots = [v.clone()];
+        assert!(forbidden(&v, &e.cfg(&roots, &[])).is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_ancestors_and_roots() {
+        let e = env();
+        e.mk("AppData/Local/Packages");
+        assert!(e.check(&e.dirs.home.join("AppData/Local")).is_some());
+        assert!(valid_project_root(Path::new("C:\\"), &e.dirs).is_err());
+        assert!(valid_project_root(Path::new("C:\\Program Files\\X"), &e.dirs).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mount_point_root_rejected_by_mount_check() {
+        let e = env();
+        // /dev (devfs) is a mount point in neither forbidden_roots list
+        assert_eq!(
+            valid_project_root(Path::new("/dev"), &e.dirs).unwrap_err(),
+            "drive or network share root"
+        );
+    }
+
+    #[test]
+    fn unexpandable_windows_tokens_fail_closed() {
+        let mut e = env();
+        e.dirs.app_data = None;
+        e.dirs.local_app_data = None;
+        e.mk("x/y");
+        let r = e.check(&e.dirs.home.join("x/y"));
+        if platform::CURRENT_OS == Os::Windows {
+            assert_eq!(r.unwrap(), "can't resolve protected folders");
+        } else {
+            assert_eq!(r, None);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn placeholder_check_does_not_break_normal_walk() {
+        let e = env();
+        let c = e.mk("cache/a");
+        assert_eq!(find_secret_inside(c.parent().unwrap(), 10).unwrap(), None);
     }
 }
