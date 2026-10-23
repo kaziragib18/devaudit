@@ -423,7 +423,7 @@ impl Guard {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::procs::Snapshot;
     use crate::run::{FakeRunner, Output, SystemRunner};
@@ -432,17 +432,17 @@ mod tests {
 
     const DAY: u64 = 86_400;
 
-    fn real() -> SystemRunner {
+    pub(crate) fn real() -> SystemRunner {
         SystemRunner {
             tool_dirs: platform::tool_dirs(&platform::known_dirs()),
         }
     }
 
-    fn git_bin() -> PathBuf {
+    pub(crate) fn git_bin() -> PathBuf {
         real().resolve("git").expect("git installed")
     }
 
-    fn sh(dir: &Path, args: &[&str]) {
+    pub(crate) fn sh(dir: &Path, args: &[&str]) {
         let st = Command::new(git_bin())
             .args(["-c", "user.name=t", "-c", "user.email=t@t"])
             .args(args)
@@ -454,7 +454,7 @@ mod tests {
         assert!(st.success(), "git {args:?}");
     }
 
-    fn old(path: &Path) {
+    pub(crate) fn old(path: &Path) {
         let t = SystemTime::now() - Duration::from_secs(400 * DAY);
         File::options()
             .write(true)
@@ -465,7 +465,7 @@ mod tests {
     }
 
     /// Committed, clean repo whose files and commit are 2020-old.
-    fn old_repo() -> tempfile::TempDir {
+    pub(crate) fn old_repo() -> tempfile::TempDir {
         let d = tempfile::tempdir().unwrap();
         fs::write(d.path().join("a.txt"), "x").unwrap();
         sh(d.path(), &["init", "-q"]);
@@ -475,14 +475,14 @@ mod tests {
         d
     }
 
-    fn old_plain() -> tempfile::TempDir {
+    pub(crate) fn old_plain() -> tempfile::TempDir {
         let d = tempfile::tempdir().unwrap();
         fs::write(d.path().join("a.txt"), "x").unwrap();
         old(&d.path().join("a.txt"));
         d
     }
 
-    fn p(pid: u32, name: &str, cwd: Option<&str>, cmd: &[&str]) -> Proc {
+    pub(crate) fn p(pid: u32, name: &str, cwd: Option<&str>, cmd: &[&str]) -> Proc {
         Proc {
             pid,
             uid_matches_me: true,
@@ -493,26 +493,26 @@ mod tests {
         }
     }
 
-    fn snap(procs: Vec<Proc>) -> Snapshot {
+    pub(crate) fn snap(procs: Vec<Proc>) -> Snapshot {
         Snapshot {
             procs,
             ..Snapshot::default()
         }
     }
 
-    fn guard(procs: Vec<Proc>) -> Guard {
+    pub(crate) fn guard(procs: Vec<Proc>) -> Guard {
         Guard::build(&snap(procs), &FakeRunner::new(), 14, SystemTime::now()).unwrap()
     }
 
     /// A nonexistent path outside any test project.
-    fn elsewhere() -> String {
+    pub(crate) fn elsewhere() -> String {
         std::env::temp_dir()
             .join("devaudit-nonexistent-elsewhere")
             .to_string_lossy()
             .into_owned()
     }
 
-    fn quiet() -> Guard {
+    pub(crate) fn quiet() -> Guard {
         guard(vec![p(1, "zsh", Some(&elsewhere()), &[])])
     }
 
