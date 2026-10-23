@@ -215,7 +215,7 @@ fn prepare_dir(dir: &Path) -> Result<(), String> {
 }
 
 /// Temp file in the same dir, then rename over the old file.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let e = |e: std::io::Error| format!("{}: {e}", path.display());
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".tmp");

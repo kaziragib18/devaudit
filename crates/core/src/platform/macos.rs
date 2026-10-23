@@ -189,6 +189,21 @@ pub fn hide_from_backup_and_index(dir: &Path) -> Result<(), String> {
     }
 }
 
+/// Read-only files can be removed on macOS (the dir's permissions decide): nothing to clear.
+pub fn clear_readonly_tree(_dir: &Path) -> bool {
+    false
+}
+
+/// Test helper: `tmutil isexcluded` says the dir is excluded.
+#[cfg(test)]
+pub(crate) fn is_hidden_from_backup_and_index(dir: &Path) -> bool {
+    Command::new("/usr/bin/tmutil")
+        .arg("isexcluded")
+        .arg(dir)
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("[Excluded]"))
+}
+
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
     fs::File::open(dir)?.sync_all()
 }

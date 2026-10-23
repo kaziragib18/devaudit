@@ -219,6 +219,17 @@ fn secret_component(p: &Path, skip: usize) -> bool {
 }
 
 pub fn forbidden(path: &Path, cfg: &NeverCfg) -> Option<String> {
+    check(path, cfg, false)
+}
+
+/// `forbidden` for a Recovery restore target: the same checks, except that the target may sit
+/// less than 2 components below its root and need not exist yet (then its drive and mount-point
+/// checks are skipped; the caller checks every existing ancestor instead).
+pub fn forbidden_restore_target(path: &Path, cfg: &NeverCfg) -> Option<String> {
+    check(path, cfg, true)
+}
+
+fn check(path: &Path, cfg: &NeverCfg, restore: bool) -> Option<String> {
     let own = "DevAudit's own data".to_string();
     let vault = |p: &Path| {
         p.components().any(|c| {
@@ -252,7 +263,7 @@ pub fn forbidden(path: &Path, cfg: &NeverCfg) -> Option<String> {
     let Some((root, rroot)) = root else {
         return Some("outside home and project roots".into());
     };
-    if rp.components().count() < rroot.components().count() + 2 {
+    if !restore && rp.components().count() < rroot.components().count() + 2 {
         return Some("too shallow".into());
     }
 
@@ -297,7 +308,11 @@ pub fn forbidden(path: &Path, cfg: &NeverCfg) -> Option<String> {
     match std::fs::symlink_metadata(path) {
         Ok(md) if platform::is_link(&md) => return Some("is a link".into()),
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if restore {
+                return None;
+            }
+        }
         Err(_) => return Some("cannot inspect path".into()),
     }
 
@@ -520,6 +535,27 @@ mod tests {
             e.check(&e.dirs.home.join("p/q/.env")).unwrap(),
             "contains a secret file name"
         );
+    }
+
+    #[test]
+    fn restore_target_ignores_only_depth_and_existence() {
+        let e = env();
+        e.mk("p");
+        let r = |p: &Path| forbidden_restore_target(p, &e.cfg(&[], &[]));
+        let h = &e.dirs.home;
+        // Shallow and missing: fine for a restore, refused for an action.
+        assert_eq!(r(&h.join("p")), None);
+        assert_eq!(r(&h.join("gone/x")), None);
+        assert!(e.check(&h.join("gone/x")).is_some());
+        // Everything else still applies.
+        assert_eq!(r(&h.join(".ssh/x")).unwrap(), "never-touch: .ssh");
+        assert_eq!(r(&h.join("p/.env")).unwrap(), "contains a secret file name");
+        assert_eq!(r(&e.base).unwrap(), "outside home and project roots");
+        assert!(r(&e.data.join("vault/x")).is_some());
+        let elsewhere = e.mk("elsewhere");
+        if dir_link(&elsewhere, &h.join("p/ln")) {
+            assert_eq!(r(&h.join("p/ln")).unwrap(), "is a link");
+        }
     }
 
     #[cfg(target_os = "macos")]

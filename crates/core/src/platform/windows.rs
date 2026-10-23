@@ -15,7 +15,7 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_OFFLINE,
+    FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY,
     FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
     FILE_ID_INFO, FILE_READ_ATTRIBUTES, FileIdInfo, FindFirstVolumeW, FindNextVolumeW,
@@ -464,6 +464,41 @@ pub fn hide_from_backup_and_index(dir: &Path) -> Result<(), String> {
         return Err(io::Error::last_os_error().to_string());
     }
     Ok(())
+}
+
+/// Clears FILE_ATTRIBUTE_READONLY on `dir` and everything below it, never entering links or
+/// other reparse points. True if any attribute was changed.
+pub fn clear_readonly_tree(dir: &Path) -> bool {
+    let mut changed = false;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        let Ok(md) = fs::symlink_metadata(&p) else {
+            continue;
+        };
+        let attrs = md.file_attributes();
+        if attrs & FILE_ATTRIBUTE_READONLY != 0 {
+            let w = wide(&p);
+            // SAFETY: w is NUL-terminated.
+            changed |=
+                unsafe { SetFileAttributesW(w.as_ptr(), attrs & !FILE_ATTRIBUTE_READONLY) } != 0;
+        }
+        if md.is_dir() && !is_link(&md) {
+            stack.extend(
+                fs::read_dir(&p)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|e| e.path()),
+            );
+        }
+    }
+    changed
+}
+
+/// Test helper: FILE_ATTRIBUTE_NOT_CONTENT_INDEXED is set.
+#[cfg(test)]
+pub(crate) fn is_hidden_from_backup_and_index(dir: &Path) -> bool {
+    fs::metadata(dir).is_ok_and(|m| m.file_attributes() & FILE_ATTRIBUTE_NOT_CONTENT_INDEXED != 0)
 }
 
 /// FlushFileBuffers on a directory handle.

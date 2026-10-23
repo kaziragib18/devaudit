@@ -24,8 +24,11 @@
 //! - `create_private(path)` (macOS 0600), `set_private_dir(dir)` (macOS 0700); Windows relies on the
 //!   ACL inherited from LocalAppData
 //! - `recycle_bin_bytes(root)`: Windows `SHQueryRecycleBinW`; `Err` on macOS
+//! - `clear_readonly_tree(dir)`: Windows clears FILE_ATTRIBUTE_READONLY below `dir` (never
+//!   through links) and says whether it changed anything; nothing to do on macOS
 //!
-//! Shared here: `known_dirs`, `eq_ci`, `inside`, `volume_of`, `volume_space`.
+//! Shared here: `known_dirs`, `eq_ci`, `inside`, `volume_of`, `volume_space`,
+//! `remove_dir_all_retry`.
 
 use std::ffi::OsString;
 use std::io;
@@ -216,6 +219,22 @@ pub fn volume_space(p: &Path) -> io::Result<(u64, u64)> {
         return Ok((total.map_or(f, |t| t.0), f));
     }
     os_volume_space(p)
+}
+
+/// `remove_dir_all` (never follows links); on failure, clears read-only attributes (Windows)
+/// and tries once more. A missing `dir` is Ok. Only the Recovery purge may call this.
+pub fn remove_dir_all_retry(dir: &Path) -> io::Result<()> {
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => {
+            if clear_readonly_tree(dir) {
+                std::fs::remove_dir_all(dir)
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 /// Test hook: `volume_of` reports `volume` for `path` and everything below it.
