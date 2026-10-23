@@ -236,10 +236,9 @@ fn allowance_advice(ctx: &Ctx, vm: &VmInfo, ram_total: u64, swap_used_pct: u8) -
     if ram_total == 0 || swap_used_pct <= 50 {
         return None;
     }
-    // The WSL default is exactly half, so it counts; an explicit setting must exceed half.
     let default = vm.memory_source.starts_with("WSL default");
     let (m2, r) = (u128::from(mem) * 2, u128::from(ram_total));
-    if !(m2 > r || (default && m2 == r)) {
+    if m2 < r {
         return None;
     }
     let (what, swap, fix) = match ctx.os {
@@ -342,8 +341,11 @@ fn is_monitoring(image: &str) -> bool {
         || (r.contains('/') && last.starts_with("jaeger"))
 }
 
-/// Mount sources of `inspect` output lines, one list per container; None when unreadable.
-fn inspect_mounts(text: &str, os: Os, expect: usize) -> Option<Vec<Vec<PathBuf>>> {
+/// Bind-mount sources of `inspect` output lines, one list per container: the parsed path, or
+/// the raw source when it can't be mapped to a host path. None when the output is unreadable.
+type Mounts = Vec<Vec<Result<PathBuf, String>>>;
+
+fn inspect_mounts(text: &str, os: Os, expect: usize) -> Option<Mounts> {
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     if lines.len() != expect {
         return None;
@@ -355,16 +357,84 @@ fn inspect_mounts(text: &str, os: Os, expect: usize) -> Option<Vec<Vec<PathBuf>>
             Some(
                 v.iter()
                     .filter(|m| m["Type"] == "bind")
-                    .filter_map(|m| m["Source"].as_str())
-                    .filter_map(|s| guard::normalize_mount_for(os, s))
+                    .map(|m| {
+                        let src = m["Source"].as_str().unwrap_or("");
+                        guard::normalize_mount_for(os, src).ok_or_else(|| src.to_string())
+                    })
                     .collect(),
             )
         })
         .collect()
 }
 
-/// Why a stop group can't be offered, or None. Project mounts are those inside (or
-/// containing) a project root; they must not be locked by anything but Docker itself.
+/// `p` relative to `root`, comparing canonical forms when both resolve.
+fn rel_to(p: &Path, root: &Path) -> Option<PathBuf> {
+    if let (Ok(cp), Ok(cr)) = (platform::canon(p), platform::canon(root)) {
+        return cp.strip_prefix(&cr).ok().map(Path::to_path_buf);
+    }
+    p.strip_prefix(root).ok().map(Path::to_path_buf)
+}
+
+/// The project that owns a mounted path under a configured root: the nearest ancestor with
+/// a `.git`, else the root's top-level folder containing it.
+fn owning_project(m: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
+    for r in roots {
+        let Some(rel) = rel_to(m, r) else { continue };
+        let first = rel.components().next()?;
+        let mut cur = r.join(&rel);
+        while cur != *r {
+            if cur.join(".git").exists() {
+                return Some(cur);
+            }
+            if !cur.pop() {
+                break;
+            }
+        }
+        return Some(r.join(first));
+    }
+    None
+}
+
+fn is_big(ctx: &Ctx, m: &Path, roots: &[PathBuf]) -> bool {
+    m.components().count() <= 1
+        || guard::maybe_inside(&ctx.home, m)
+        || roots.iter().any(|r| guard::maybe_inside(r, m))
+}
+
+fn nearest_git(p: &Path) -> Option<PathBuf> {
+    p.ancestors()
+        .find(|a| a.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
+/// Locks that need no walk: a process working inside the mount (or in the git project that
+/// contains it), or a command line naming a path inside it.
+fn cheap_locks(g: &Guard, m: &Path) -> Vec<String> {
+    let mut out = vec![];
+    for (pid, cwd) in &g.cwds {
+        let top = nearest_git(cwd);
+        if guard::maybe_inside(cwd, m) || top.is_some_and(|t| guard::maybe_inside(m, &t)) {
+            out.push(format!(
+                "a process (pid {pid}) is working in {}",
+                m.display()
+            ));
+        }
+    }
+    let needle = guard::normalize_path_text(&m.to_string_lossy());
+    for (pid, cmd) in &g.cmd_paths {
+        let hit = cmd.strip_prefix(&needle).is_some_and(|r| {
+            r.is_empty() || r.starts_with(['/', '\\']) || needle.ends_with(['/', '\\'])
+        });
+        if hit {
+            out.push(format!("a process (pid {pid}) is using {}", m.display()));
+        }
+    }
+    out
+}
+
+/// Why a stop group can't be offered, or None. Every bind mount is checked: cheap locks
+/// always; the owning project's full guard check when it sits under a configured root; a
+/// mount that contains a root or home is never walked, its roots' projects are checked.
 fn group_blocker(
     ctx: &Ctx,
     guard: Result<&Guard, &GuardError>,
@@ -385,18 +455,48 @@ fn group_blocker(
     };
     let (roots, _) = projects::roots(ctx);
     let mut reasons: Vec<String> = vec![];
-    for m in mounts.iter().flatten() {
-        let project = roots
-            .iter()
-            .any(|r| guard::maybe_inside(m, r) || guard::maybe_inside(r, m));
-        if !project {
-            continue;
-        }
-        for r in g.check(m, ctx.run).reasons {
+    let mut add = |rs: Vec<String>| {
+        for r in rs {
             if r != MOUNT_REASON && !reasons.contains(&r) {
                 reasons.push(r);
             }
         }
+    };
+    let mut to_check: Vec<PathBuf> = vec![];
+    for (c, list) in members.iter().zip(&mounts) {
+        for m in list {
+            let m = match m {
+                Ok(m) => m,
+                Err(_) => {
+                    add(vec![format!("can't tell what {} mounts", c.name)]);
+                    continue;
+                }
+            };
+            if is_big(ctx, m, &roots) {
+                for r in roots.iter().filter(|r| guard::maybe_inside(r, m)) {
+                    if r.join(".git").exists() {
+                        to_check.push(r.clone());
+                    }
+                    if let Ok(rd) = fs::read_dir(r) {
+                        to_check.extend(
+                            rd.flatten()
+                                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                                .map(|e| e.path()),
+                        );
+                    }
+                }
+                continue;
+            }
+            add(cheap_locks(g, m));
+            if let Some(p) = owning_project(m, &roots) {
+                to_check.push(p);
+            }
+        }
+    }
+    to_check.sort();
+    to_check.dedup();
+    for p in to_check {
+        add(g.check(&p, ctx.run).reasons);
     }
     (!reasons.is_empty()).then(|| format!("Mounts an active project: {}", reasons.join("; ")))
 }
@@ -772,7 +872,7 @@ mod tests {
                 dirs,
             }
         }
-        fn ctx<'a>(&'a self, os: Os, run: &'a FakeRunner) -> Ctx<'a> {
+        fn ctx<'a>(&'a self, os: Os, run: &'a dyn crate::run::Runner) -> Ctx<'a> {
             Ctx::new(
                 os,
                 self.dirs.clone(),
@@ -1136,11 +1236,119 @@ mod tests {
             .find(|f| matches!(f.method, Method::DockerStop { .. }))
             .unwrap();
         assert!(f.reason.contains("in use"), "{}", f.reason);
-        // A mounted folder that is not a project is ignored.
+        // A mounted folder outside every root is still checked: a process working in it locks.
         let other = e.home().join("elsewhere");
         fs::create_dir_all(&other).unwrap();
-        let s = scan_mac(&e, &mount_runner(&other), &guard(vec![(7, other)]));
+        let s = scan_mac(&e, &mount_runner(&other), &guard(vec![(7, other.clone())]));
+        assert_eq!(obs_tier(&s), Tier::Protected);
+        let s = scan_mac(&e, &mount_runner(&other), &guard(vec![]));
         assert_eq!(obs_tier(&s), Tier::Review);
+    }
+
+    fn reason_of(s: &DockerScan) -> String {
+        s.findings
+            .iter()
+            .find(|f| matches!(f.method, Method::DockerStop { .. }))
+            .unwrap()
+            .reason
+            .clone()
+    }
+
+    #[test]
+    fn subfolder_mount_locks_the_owning_project() {
+        let e = Env::new();
+        let proj = old_project(&e, "api");
+        let sub = proj.join("grafana/provisioning");
+        fs::create_dir_all(&sub).unwrap();
+        let r = mount_runner(&sub);
+        assert_eq!(obs_tier(&scan_mac(&e, &r, &guard(vec![]))), Tier::Review);
+        // The cwd is the project root, which is not inside the mounted subfolder.
+        let s = scan_mac(&e, &r, &guard(vec![(7, proj.clone())]));
+        assert_eq!(obs_tier(&s), Tier::Protected);
+        assert!(reason_of(&s).contains("in use"), "{}", reason_of(&s));
+    }
+
+    /// Docker answers from the fake; git and everything else are real.
+    struct Mixed(FakeRunner, crate::run::SystemRunner);
+
+    impl crate::run::Runner for Mixed {
+        fn run(&self, argv: &[&str], t: Duration) -> Result<Output, RunError> {
+            if argv[0] == "docker" {
+                self.0.run(argv, t)
+            } else {
+                self.1.run(argv, t)
+            }
+        }
+        fn run_to_file(&self, a: &[&str], t: Duration, o: &Path) -> Result<(), RunError> {
+            self.1.run_to_file(a, t, o)
+        }
+        fn run_from_file(&self, a: &[&str], t: Duration, i: &Path) -> Result<Output, RunError> {
+            self.1.run_from_file(a, t, i)
+        }
+    }
+
+    #[test]
+    fn subfolder_mount_of_dirty_git_project_is_protected() {
+        let e = Env::new();
+        let proj = old_project(&e, "api");
+        let real = crate::run::SystemRunner {
+            tool_dirs: platform::tool_dirs(&platform::known_dirs()),
+        };
+        let init = real
+            .run(
+                &["git", "-C", &proj.to_string_lossy(), "init", "-q"],
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        assert_eq!(init.status, 0);
+        let sub = proj.join("grafana");
+        fs::create_dir_all(&sub).unwrap();
+        let old = SystemTime::now() - Duration::from_secs(400 * 86_400);
+        fs::File::options()
+            .write(true)
+            .open(proj.join("a.txt"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        // a.txt is untracked and old: only "uncommitted changes" can lock it.
+        let run = Mixed(mount_runner(&sub), real);
+        let s = scan(&e.ctx(Os::Macos, &run), Ok(&guard(vec![])), 16 * GIB, 10);
+        assert_eq!(obs_tier(&s), Tier::Protected);
+        assert!(reason_of(&s).contains("uncommitted"), "{}", reason_of(&s));
+    }
+
+    #[test]
+    fn unmappable_bind_source_is_protected() {
+        let e = Env::new();
+        let r = mount_runner(Path::new(r"\\wsl$\Ubuntu\home\dev\obs"));
+        let s = scan(&e.ctx(Os::Windows, &r), Ok(&guard(vec![])), 16 * GIB, 10);
+        assert_eq!(obs_tier(&s), Tier::Protected);
+        assert!(
+            reason_of(&s).contains("can't tell what"),
+            "{}",
+            reason_of(&s)
+        );
+    }
+
+    #[test]
+    fn mount_containing_roots_is_not_walked() {
+        let e = Env::new();
+        let proj = old_project(&e, "api");
+        // `/` (node-exporter style) and the home folder both contain the root. Walking either
+        // would take forever; the roots' projects are checked instead.
+        for big in [Path::new("/"), e.home()] {
+            let r = mount_runner(big);
+            assert_eq!(obs_tier(&scan_mac(&e, &r, &guard(vec![]))), Tier::Review);
+            let s = scan_mac(&e, &r, &guard(vec![(7, proj.clone())]));
+            assert_eq!(obs_tier(&s), Tier::Protected);
+            // git is only ever asked about projects under the root, never about the mount.
+            for c in r.calls().iter().filter(|c| c[0] == "git") {
+                assert!(
+                    c.iter().all(|a| a != "/" && Path::new(a) != e.home()),
+                    "{c:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1258,10 +1466,17 @@ mod tests {
             .find(|f| f.category == Category::Advice)
             .unwrap();
         assert!(a.title.contains("50%") || a.reason.contains("50%"), "{a:?}");
-        // Explicit .wslconfig at exactly half is not "over half".
+        // One rule for both: an explicit allowance of exactly half also counts.
         e.write(".wslconfig", "[wsl2]\nmemory=8GB\n");
         let s = scan(&e.ctx(Os::Windows, &r), Ok(&g), 16 * GIB, 80);
         assert_eq!(s.vm.memory_source, ".wslconfig");
+        assert!(s.findings.iter().any(|f| f.category == Category::Advice));
+        // Below half: none. Swap not above 50%: none.
+        e.write(".wslconfig", "[wsl2]\nmemory=6GB\n");
+        let s = scan(&e.ctx(Os::Windows, &r), Ok(&g), 16 * GIB, 80);
+        assert!(s.findings.iter().all(|f| f.category != Category::Advice));
+        e.write(".wslconfig", "[wsl2]\nmemory=12GB\n");
+        let s = scan(&e.ctx(Os::Windows, &r), Ok(&g), 16 * GIB, 50);
         assert!(s.findings.iter().all(|f| f.category != Category::Advice));
         e.write(".wslconfig", "[wsl2]\nmemory=12GB\n");
         let s = scan(&e.ctx(Os::Windows, &r), Ok(&g), 16 * GIB, 80);
