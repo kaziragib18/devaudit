@@ -53,6 +53,7 @@ pub(super) fn real_known_dirs() -> KnownDirs {
         temp: std::env::temp_dir(),
         personal: PERSONAL.iter().map(|n| home.join(n)).collect(),
         cloud_roots,
+        apps_dir: PathBuf::from("/Applications"),
         home,
     }
 }
@@ -209,11 +210,6 @@ pub fn set_private_dir(dir: &Path) -> io::Result<()> {
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
 }
 
-/// The system-wide applications folder.
-pub fn apps_dir() -> PathBuf {
-    PathBuf::from("/Applications")
-}
-
 /// Windows only: the Recycle Bin is `~/.Trash` here, sized by the caller.
 pub fn recycle_bin_bytes(_root: &Path) -> Result<u64, String> {
     Err("not supported on macOS".into())
@@ -300,6 +296,7 @@ mod tests {
             temp: "/tmp".into(),
             personal: vec![],
             cloud_roots: vec![],
+            apps_dir: "/Applications".into(),
         };
         assert_eq!(data_dir(&k), Path::new("/Users/u/.devaudit"));
         assert_eq!(VAULT_DIR_NAME, "vault.noindex");

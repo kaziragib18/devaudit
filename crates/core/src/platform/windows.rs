@@ -208,6 +208,9 @@ pub(super) fn real_known_dirs() -> KnownDirs {
         temp: std::env::temp_dir(),
         personal,
         cloud_roots,
+        apps_dir: known_folder(&FOLDERID_ProgramFiles)
+            .or_else(|| env_path("ProgramFiles"))
+            .unwrap_or_else(|| r"C:\Program Files".into()),
         home,
     }
 }
@@ -480,11 +483,6 @@ pub fn create_private(path: &Path) -> io::Result<fs::File> {
 /// Nothing to do: the ACL is inherited from LocalAppData.
 pub fn set_private_dir(_dir: &Path) -> io::Result<()> {
     Ok(())
-}
-
-/// `%ProgramFiles%`.
-pub fn apps_dir() -> PathBuf {
-    env_path("ProgramFiles").unwrap_or_else(|| r"C:\Program Files".into())
 }
 
 /// Recycle Bin size of the drive whose root is `root` (`SHQueryRecycleBinW`).

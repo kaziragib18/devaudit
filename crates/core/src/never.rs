@@ -408,6 +408,7 @@ mod tests {
             temp: base.join("tmp"),
             personal,
             cloud_roots: vec![],
+            apps_dir: std::path::PathBuf::new(),
             home,
         };
         let data = dirs.home.join(".devaudit");

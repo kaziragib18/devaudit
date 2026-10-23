@@ -23,7 +23,6 @@
 //! - `forbidden_roots(d)`
 //! - `create_private(path)` (macOS 0600), `set_private_dir(dir)` (macOS 0700); Windows relies on the
 //!   ACL inherited from LocalAppData
-//! - `apps_dir()`: `/Applications` | `%ProgramFiles%`
 //! - `recycle_bin_bytes(root)`: Windows `SHQueryRecycleBinW`; `Err` on macOS
 //!
 //! Shared here: `known_dirs`, `eq_ci`, `inside`, `volume_of`, `volume_space`.
@@ -51,6 +50,8 @@ pub struct KnownDirs {
     pub personal: Vec<PathBuf>,
     /// OneDrive / Dropbox / Google Drive / iCloud roots that exist.
     pub cloud_roots: Vec<PathBuf>,
+    /// `/Applications` | `%ProgramFiles%`.
+    pub apps_dir: PathBuf,
 }
 
 /// `exact`: a project root may not equal or contain these.
@@ -81,6 +82,7 @@ fn dirs_under(root: &Path) -> KnownDirs {
         temp: root.join("tmp"),
         personal: PERSONAL.iter().map(|n| home.join(n)).collect(),
         cloud_roots: vec![],
+        apps_dir: root.join("apps"),
         home,
     }
 }
@@ -254,6 +256,13 @@ mod fake {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn test_root_redirects_apps_dir() {
+        let root = Path::new("/some/test/root");
+        let d = dirs_under(root);
+        assert!(d.apps_dir.starts_with(root) && d.home.starts_with(root));
+    }
+
     use super::*;
     use std::fs;
     use std::path::Path;

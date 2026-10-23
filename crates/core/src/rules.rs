@@ -315,6 +315,7 @@ mod tests {
             temp: h.join("T"),
             personal: vec![],
             cloud_roots: vec![],
+            apps_dir: std::path::PathBuf::new(),
         }
     }
     fn write(d: &Path, name: &str, s: &str) {

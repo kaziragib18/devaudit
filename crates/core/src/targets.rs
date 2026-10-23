@@ -831,6 +831,7 @@ mod tests {
                 temp: home.join("AppData/Local/Temp"),
                 personal: vec![],
                 cloud_roots: vec![],
+                apps_dir: std::path::PathBuf::new(),
             };
             Env {
                 _tmp: tmp,

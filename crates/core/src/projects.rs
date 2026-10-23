@@ -260,6 +260,7 @@ mod tests {
                 temp: home.join("tmp"),
                 personal: vec![],
                 cloud_roots: vec![],
+                apps_dir: std::path::PathBuf::new(),
             };
             Env {
                 _tmp: tmp,

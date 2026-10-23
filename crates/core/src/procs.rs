@@ -507,6 +507,7 @@ mod tests {
             temp: PathBuf::from("/t"),
             personal: vec![],
             cloud_roots: vec![],
+            apps_dir: std::path::PathBuf::new(),
         };
         let now = UNIX_EPOCH + Duration::from_secs(NOW);
         let ctx = Ctx::new(os, dirs, PathBuf::from("/d"), &run, &rules, now, 9999);

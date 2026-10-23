@@ -13,7 +13,7 @@
 //! current scan itself (same `scanned_at`), so it gives the same answer before and
 //! after `save`.
 
-use crate::guard::Guard;
+use crate::guard::{Guard, GuardError};
 use crate::model::{Category, DiskInfo, Finding, Method, Os, Report, Skipped};
 use crate::platform::{self, KnownDirs};
 use crate::{Ctx, disk, docker, procs, projects, targets};
@@ -25,7 +25,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 
-const RECENT_DAYS: u32 = 14;
 pub const MAX_HISTORY_ROWS: usize = 5000;
 const REPORT_FILE: &str = "report.json";
 const HISTORY_FILE: &str = "history.csv";
@@ -58,24 +57,22 @@ fn unseen(used: u64, home: u64, apps: u64, images: u64) -> u64 {
         .saturating_sub(images)
 }
 
-/// Bytes of the Windows Docker/WSL `*.vhdx` findings already counted. Only if none was found
-/// is the Docker VM image size used, so an image is never subtracted twice.
-fn counted_images(findings: &[Finding], vm_image: Option<u64>) -> u64 {
-    let vhdx: u64 = findings
+/// Bytes of the Windows Docker/WSL `*.vhdx` findings that `usage(home)` and `usage(apps)` did
+/// not already count, i.e. images outside both. One inside either is already part of
+/// the scanned total and must not be subtracted again.
+fn counted_images(findings: &[Finding], home: &Path, apps: &Path) -> u64 {
+    findings
         .iter()
         .filter(|f| {
             f.path.as_deref().is_some_and(|p| {
                 p.extension()
                     .is_some_and(|x| x.eq_ignore_ascii_case("vhdx"))
+                    && !platform::inside(p, home)
+                    && !platform::inside(p, apps)
             })
         })
         .map(|f| f.bytes)
-        .sum();
-    if vhdx > 0 {
-        vhdx
-    } else {
-        vm_image.unwrap_or(0)
-    }
+        .sum()
 }
 
 fn trash_bytes(ctx: &Ctx, cancel: &AtomicBool, notes: &mut Vec<String>) -> u64 {
@@ -113,7 +110,7 @@ fn disk_info(
         (0, 0)
     });
     let home = disk::usage(&ctx.home, &[], cancel);
-    let apps = disk::usage(&platform::apps_dir(), &[], cancel);
+    let apps = disk::usage(&ctx.dirs.apps_dir, &[], cancel);
     skipped.extend(home.skipped);
     skipped.extend(apps.skipped);
     if home.cancelled || apps.cancelled {
@@ -134,6 +131,10 @@ fn disk_info(
     }
 }
 
+fn build_guard(ctx: &Ctx, snap: &procs::Snapshot) -> Result<Guard, GuardError> {
+    Guard::build(snap, ctx.run, ctx.rules.recent_days, ctx.now)
+}
+
 /// Runs every scanner in order and assembles the report. Read-only.
 pub fn scan(ctx: &Ctx, cancel: &AtomicBool, progress: &dyn Fn(&str)) -> Report {
     let mut notes = vec![];
@@ -145,7 +146,7 @@ pub fn scan(ctx: &Ctx, cancel: &AtomicBool, progress: &dyn Fn(&str)) -> Report {
     progress("Reading running programs");
     let snap = procs::snapshot();
     let mem = procs::mem_info(&snap);
-    let guard = Guard::build(&snap, ctx.run, RECENT_DAYS, ctx.now);
+    let guard = build_guard(ctx, &snap);
     let g = guard.as_ref();
     if g.is_err() {
         notes.push("Process data is unavailable, so project folders are protected.".into());
@@ -178,13 +179,12 @@ pub fn scan(ctx: &Ctx, cancel: &AtomicBool, progress: &dyn Fn(&str)) -> Report {
         .map_or(0, |p| p.min(100) as u8);
     progress("Checking Docker");
     let d = docker::scan(ctx, g, mem.total, swap_pct);
-    let vm_image = d.vm.disk_image_bytes;
     findings.extend(d.findings);
     notes.extend(d.notes);
     findings.extend(targets::advice_findings(ctx, &mem));
 
     progress("Measuring the disk");
-    let images = counted_images(&findings, vm_image);
+    let images = counted_images(&findings, &ctx.home, &ctx.dirs.apps_dir);
     let disk = disk_info(ctx, cancel, images, &mut notes, &mut skipped);
     sort_findings(&mut findings);
     Report {
@@ -255,16 +255,22 @@ fn category_bytes(r: &Report) -> Vec<u64> {
         .collect()
 }
 
-/// (scanned_at, bytes per category) of every well-formed row, oldest first.
-fn read_history(data_dir: &Path) -> Vec<(u64, Vec<u64>)> {
-    let Ok(text) = fs::read_to_string(data_dir.join(HISTORY_FILE)) else {
-        return vec![];
+type Row = (u64, Vec<u64>);
+
+/// (scanned_at, bytes per category) of every well-formed row, oldest first. A missing
+/// file or a foreign header is an empty history; any other failure is an error.
+fn read_history_checked(data_dir: &Path) -> Result<Vec<Row>, String> {
+    let path = data_dir.join(HISTORY_FILE);
+    let text = match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
     };
     let mut lines = text.lines();
     if lines.next() != Some(header().as_str()) {
-        return vec![];
+        return Ok(vec![]);
     }
-    lines
+    Ok(lines
         .filter_map(|l| {
             let v: Vec<u64> = l
                 .split(',')
@@ -272,11 +278,12 @@ fn read_history(data_dir: &Path) -> Vec<(u64, Vec<u64>)> {
                 .collect::<Option<_>>()?;
             (v.len() == CATEGORIES.len() + 1).then(|| (v[0], v[1..].to_vec()))
         })
-        .collect()
+        .collect())
 }
 
 fn append_history(data_dir: &Path, report: &Report) -> Result<(), String> {
-    let mut rows = read_history(data_dir);
+    // Never overwrite a history that couldn't be read.
+    let mut rows = read_history_checked(data_dir)?;
     rows.push((report.scanned_at, category_bytes(report)));
     let skip = rows.len().saturating_sub(MAX_HISTORY_ROWS);
     let mut out = header();
@@ -306,7 +313,8 @@ pub fn load_last(data_dir: &Path) -> Option<Report> {
 /// Per-category change in reclaimable bytes since the previous scan; unchanged
 /// categories and `Process` (memory, not disk) are left out. Empty without history.
 pub fn growth(data_dir: &Path, current: &Report) -> Vec<Growth> {
-    let prev = read_history(data_dir)
+    let prev = read_history_checked(data_dir)
+        .unwrap_or_default()
         .into_iter()
         .rev()
         .find(|(t, _)| *t != current.scanned_at);
@@ -391,6 +399,7 @@ mod tests {
             temp: home.join("tmp"),
             personal: vec![],
             cloud_roots: vec![],
+            apps_dir: std::path::PathBuf::new(),
         }
     }
 
@@ -486,7 +495,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("history.csv"), "junk\n1,2,3\n").unwrap();
         save(&report(5, vec![]), tmp.path()).unwrap();
-        assert_eq!(read_history(tmp.path()).len(), 1);
+        assert_eq!(read_history_checked(tmp.path()).unwrap().len(), 1);
     }
 
     #[test]
@@ -505,18 +514,55 @@ mod tests {
     }
 
     #[test]
-    fn unseen_is_floored_and_images_are_not_double_counted() {
+    fn unseen_is_floored_and_images_inside_home_are_not_subtracted() {
         assert_eq!(unseen(100, 30, 20, 10), 40);
         assert_eq!(unseen(10, 30, 20, 10), 0);
-        let mut vhdx = finding(Category::Advice, "x.vhdx", 700, Tier::Review, Method::None);
-        vhdx.path = Some(PathBuf::from(r"C:\L\Docker\wsl\disk\docker_data.VHDX"));
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let apps = tmp.path().join("apps");
+        let elsewhere = tmp.path().join("other");
+        let vhdx = |dir: &Path, bytes| {
+            let mut f = finding(Category::Advice, "x", bytes, Tier::Review, Method::None);
+            f.path = Some(dir.join("Docker/wsl/disk/docker_data.VHDX"));
+            f
+        };
         let other = finding(Category::Temp, "t", 5, Tier::Safe, Method::None);
-        assert_eq!(
-            counted_images(&[vhdx.clone(), other.clone()], Some(700)),
-            700
+        let inside = vhdx(&home.join("AppData/Local"), 700);
+        assert_eq!(counted_images(&[inside, other.clone()], &home, &apps), 0);
+        assert_eq!(counted_images(&[vhdx(&apps, 9)], &home, &apps), 0);
+        let out = vhdx(&elsewhere, 300);
+        assert_eq!(counted_images(&[out, other], &home, &apps), 300);
+    }
+
+    #[test]
+    fn raised_recent_days_reaches_the_guard() {
+        use crate::guard::tests::{elsewhere, p, snap};
+        let mut rules = rules::builtin();
+        rules.recent_days = 45;
+        let run = crate::run::FakeRunner::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(
+            Os::current(),
+            dirs(tmp.path()),
+            tmp.path().join(".devaudit"),
+            &run,
+            &rules,
+            SystemTime::now(),
+            1,
         );
-        assert_eq!(counted_images(&[other], Some(300)), 300);
-        assert_eq!(counted_images(&[], None), 0);
+        let g = build_guard(&ctx, &snap(vec![p(1, "zsh", Some(&elsewhere()), &[])])).unwrap();
+        assert_eq!(g.recent_days, 45);
+    }
+
+    #[test]
+    fn unreadable_history_is_an_error_and_left_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bad = [0xff, 0xfe, b'\n', 0x80];
+        fs::write(tmp.path().join("history.csv"), bad).unwrap();
+        assert!(save(&report(5, vec![]), tmp.path()).is_err());
+        assert_eq!(fs::read(tmp.path().join("history.csv")).unwrap(), bad);
+        assert!(append_history(tmp.path(), &report(5, vec![])).is_err());
+        assert!(growth(tmp.path(), &report(5, vec![])).is_empty());
     }
 
     #[test]
