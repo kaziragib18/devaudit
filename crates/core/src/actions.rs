@@ -246,7 +246,10 @@ fn check(
     }
     match &f.method {
         Method::None => Err("Nothing to do for this item".into()),
-        Method::Vault { path, id, .. } => path_checks(ctx, f, path, id, false, guard, create),
+        Method::Vault { path, id, .. } => {
+            path_checks(ctx, f, path, id, false, guard)?;
+            vault_available(ctx, path, create)
+        }
         Method::WorktreeVault {
             repo,
             worktree,
@@ -254,14 +257,15 @@ fn check(
             branch,
             ..
         } => {
-            path_checks(ctx, f, worktree, id, true, guard, create)?;
+            path_checks(ctx, f, worktree, id, true, guard)?;
             worktree_checks(
                 ctx,
                 repo,
                 worktree,
                 branch,
                 guard.map_err(|_| GUARD_DOWN.to_string())?,
-            )
+            )?;
+            vault_available(ctx, worktree, create)
         }
         Method::PruneOlderThan { path, .. } => {
             match (platform::canon(path), platform::canon(&ctx.dirs.temp)) {
@@ -313,7 +317,6 @@ fn path_checks(
     id: &FileId,
     worktree: bool,
     guard: Result<&Guard, &GuardError>,
-    create: bool,
 ) -> Result<(), String> {
     if f.path.as_deref().is_some_and(|p| p != path) {
         return Err("The item no longer matches the scan".into());
@@ -372,7 +375,7 @@ fn path_checks(
             return Err(format!("Contains {}", hit.display()));
         }
     }
-    vault_available(ctx, path, create)
+    Ok(())
 }
 
 /// `git worktree list --porcelain` blocks as (path, branch ref).
@@ -482,6 +485,9 @@ fn volume_checks(ctx: &Ctx, f: &Finding, name: &str) -> Result<(), String> {
 }
 
 fn stop_checks(ctx: &Ctx, ids: &[String]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Err("No containers to stop".into());
+    }
     let containers = docker::list_containers(ctx.run)?;
     for id in ids {
         if id.is_empty() || id.starts_with('-') {
@@ -515,19 +521,30 @@ fn signal_checks(
         None => return Err("The process is no longer running".into()),
     }
     let g = guard.map_err(|_| GUARD_DOWN.to_string())?;
-    // Never one of the tool's own parents, never another user's process.
-    let mut at = Some(ctx.pid);
+    // Own-user process, proven by the snapshot.
+    match g.procs.iter().find(|p| p.pid == pid) {
+        Some(p) if p.uid_matches_me => {}
+        Some(_) => return Err("It belongs to another user".into()),
+        None => return Err("Can't confirm the process belongs to you".into()),
+    }
+    // Never one of the tool's own parents: walk up from the tool to a root, with no gaps.
+    let mut cur = ctx.pid;
     for _ in 0..64 {
-        let Some(cur) = at else { break };
         if cur == pid {
             return Err("It is a parent of DevAudit".into());
         }
-        at = g.procs.iter().find(|p| p.pid == cur).and_then(|p| p.parent);
+        if cur <= 1 {
+            return Ok(());
+        }
+        match g.procs.iter().find(|p| p.pid == cur) {
+            Some(p) => match p.parent {
+                Some(next) => cur = next,
+                None => return Ok(()),
+            },
+            None => return Err("Can't trace DevAudit's parent processes".into()),
+        }
     }
-    if g.procs.iter().any(|p| p.pid == pid && !p.uid_matches_me) {
-        return Err("It belongs to another user".into());
-    }
-    Ok(())
+    Err("Can't trace DevAudit's parent processes".into())
 }
 
 #[cfg(test)]
@@ -925,27 +942,50 @@ mod tests {
         let start = crate::procs::start_time_of(pid).unwrap();
         let sig = |s: u64| with_method(Method::Signal { pid, start_time: s });
         let ctx = e.ctx();
-        {
-            validate(&ctx, &sig(start), Ok(&quiet())).unwrap();
-            is_err_with(validate(&ctx, &sig(start + 1000), Ok(&quiet())), "start");
-            // Never the tool itself.
-            let me = e.ctx_with(Os::Macos, &e.run, pid);
-            is_err_with(validate(&me, &sig(start), Ok(&quiet())), "itself");
-            // Never one of its parents.
-            let mut child_proc = p(pid, "sleep", None, &[]);
-            child_proc.parent = Some(1);
-            let mut tool = p(55, "devaudit", None, &[]);
-            tool.parent = Some(pid);
-            let g = guard(vec![p(1, "zsh", Some(&elsewhere()), &[]), tool, child_proc]);
-            let mine = e.ctx_with(Os::Macos, &e.run, 55);
-            is_err_with(validate(&mine, &sig(start), Ok(&g)), "parent");
-            // A pid that isn't running.
-            let gone = with_method(Method::Signal {
-                pid: u32::MAX - 1,
-                start_time: 1,
-            });
-            assert!(validate(&ctx, &gone, Ok(&quiet())).is_err());
-        }
+        let target = |parent: u32| {
+            let mut c = p(pid, "sleep", None, &[]);
+            c.parent = Some(parent);
+            c
+        };
+        let with_target = guard(vec![p(1, "zsh", Some(&elsewhere()), &[]), target(1)]);
+        validate(&ctx, &sig(start), Ok(&with_target)).unwrap();
+        is_err_with(
+            validate(&ctx, &sig(start + 1000), Ok(&with_target)),
+            "restarted",
+        );
+        // Absent from the snapshot: can't prove it is ours.
+        is_err_with(validate(&ctx, &sig(start), Ok(&quiet())), "belongs to you");
+        // Another user's process.
+        let mut theirs = target(1);
+        theirs.uid_matches_me = false;
+        let g = guard(vec![p(1, "zsh", Some(&elsewhere()), &[]), theirs]);
+        is_err_with(validate(&ctx, &sig(start), Ok(&g)), "another user");
+        // Never the tool itself.
+        let me = e.ctx_with(Os::Macos, &e.run, pid);
+        is_err_with(validate(&me, &sig(start), Ok(&with_target)), "itself");
+        // Never one of its parents.
+        let mut tool = p(55, "devaudit", None, &[]);
+        tool.parent = Some(pid);
+        let g = guard(vec![
+            p(1, "zsh", Some(&elsewhere()), &[]),
+            tool.clone(),
+            target(1),
+        ]);
+        let mine = e.ctx_with(Os::Macos, &e.run, 55);
+        is_err_with(validate(&mine, &sig(start), Ok(&g)), "parent");
+        // A gap in the tool's ancestry can't be ruled out.
+        tool.parent = Some(4_000_000);
+        let g = guard(vec![p(1, "zsh", Some(&elsewhere()), &[]), tool, target(1)]);
+        is_err_with(validate(&mine, &sig(start), Ok(&g)), "trace");
+        // The tool itself missing from the snapshot too.
+        let lost = e.ctx_with(Os::Macos, &e.run, 777);
+        is_err_with(validate(&lost, &sig(start), Ok(&with_target)), "trace");
+        // A pid that isn't running.
+        let gone = with_method(Method::Signal {
+            pid: u32::MAX - 1,
+            start_time: 1,
+        });
+        assert!(validate(&ctx, &gone, Ok(&with_target)).is_err());
     }
 
     #[test]
@@ -1070,6 +1110,11 @@ mod tests {
         let fake = docker_run(&run("running", "running"), DF_USED);
         let ctx = e.ctx_with(Os::current(), &fake, 1);
         validate(&ctx, &f, Ok(&quiet())).unwrap();
+        let mut none = f.clone();
+        none.method = Method::DockerStop {
+            container_ids: vec![],
+        };
+        is_err_with(validate(&ctx, &none, Ok(&quiet())), "No containers");
         let fake = docker_run(&run("running", "exited"), DF_USED);
         let ctx = e.ctx_with(Os::current(), &fake, 1);
         is_err_with(validate(&ctx, &f, Ok(&quiet())), "def456");
@@ -1128,6 +1173,15 @@ mod tests {
             branch: "feature".into(),
             keep_days: 30,
         };
+        // Refused at the worktree step (dirty): no vault side effects.
+        let exclude = main.join(".git/info/exclude");
+        let before = fs::read_to_string(&exclude).unwrap_or_default();
+        fs::write(wt.join("new.txt"), "n").unwrap();
+        old(&wt.join("new.txt"));
+        assert!(validate(&ctx, &f, Ok(&quiet())).is_err());
+        assert!(!ctx.data_dir.exists(), "refused item left a vault behind");
+        assert_eq!(fs::read_to_string(&exclude).unwrap_or_default(), before);
+        fs::remove_file(wt.join("new.txt")).unwrap();
         validate(&ctx, &f, Ok(&quiet())).unwrap();
         // Wrong branch.
         let mut wrong = f.clone();
