@@ -1,0 +1,617 @@
+{
+ "targets": [
+  {
+   "id": "npm-cacache",
+   "os": "Any",
+   "title": "npm package cache",
+   "category": "PackageCache",
+   "path": "{npm_cache}/_cacache",
+   "tier": "Safe",
+   "method": "Vault",
+   "rebuild": "Re-downloads packages on the next install",
+   "min_idle_days": 0,
+   "owner_processes": [
+    "npm",
+    "npx",
+    "npm-cli",
+    "npx-cli"
+   ]
+  },
+  {
+   "id": "npm-npx",
+   "os": "Any",
+   "title": "npx cache",
+   "category": "PackageCache",
+   "path": "{npm_cache}/_npx",
+   "tier": "Safe",
+   "method": "Vault",
+   "rebuild": "Re-downloads packages on the next install",
+   "min_idle_days": 0,
+   "owner_processes": [
+    "npm",
+    "npx",
+    "npm-cli",
+    "npx-cli"
+   ]
+  },
+  {
+   "id": "yarn-cache-macos",
+   "os": "Macos",
+   "title": "Yarn cache",
+   "category": "PackageCache",
+   "path": "{home}/Library/Caches/Yarn",
+   "tier": "Safe",
+   "method": "Vault",
+   "rebuild": "Re-downloads packages on the next install",
+   "min_idle_days": 0,
+   "owner_processes": [
+    "yarn"
+   ]
+  },
+  {
+   "id": "pip-cache-macos",
+   "os": "Macos",
+   "title": "pip cache",
+   "category": "PackageCache",
+   "path": "{home}/Library/Caches/pip",
+   "tier": "Safe",
+   "method": "Vault",
+   "rebuild": "Re-downloads packages on the next install",
+   "min_idle_days": 0,
+   "owner_processes": [
+    "pip",
+    "pip3"
+   ]
+  },
+  {
+   "id": "uv-cache-macos",
+   "os": "Macos",
+   "title": "uv cache",
+   "category": "PackageCache",
+   "path": "{home}/.cache/uv",
+   "tier": "Safe",
+   "method": "Vault",
+   "rebuild": "Re-downloads packages on the next install",
+   "min_idle_days": 0,
+   "owner_processes": [
+    "uv"
+   ]
+  },
+  {
+   "id": "pnpm-prune-macos",
+   "os": "Macos",
+   "title": "pnpm store prune (can't be undone)",
+   "category": "PackageCache",
+   "path": "{home}/Library/pnpm/store",
+   "tier": "Safe",
+   "method": {
+    "Command": [
+     "pnpm",
+     "store",
+     "prune"
+    ]
+   },
+   "rebuild": "Re-downloads packages on the next install",
+   "min_idle_days": 0,
+   "owner_processes": []
+  },
+  {
+   "id": "playwright-macos",
+   "os": "Macos",
+   "title": "Playwright browsers",
+   "category": "PackageCache",
+   "path": "{home}/Library/Caches/ms-playwright",
+   "tier": "Safe",
+   "method": "Vault",
+   "rebuild": "Re-downloads browsers with npx playwright install",
+   "min_idle_days": 0,
+   "owner_processes": []
+  },
+  {
+   "id": "playwright-mcp-macos",
+   "os": "Macos",
+   "title": "Playwright MCP browsers",
+   "category": "PackageCache",
+   "path": "{home}/Library/Caches/ms-playwright-mcp",
+   "tier": "Safe",
+   "method": "Vault",
+   "rebuild": "Re-downloads browsers with npx playwright install",
+   "min_idle_days": 0,
+   "owner_processes": []
+  },
+  {
+   "id": "chrome-cache-macos",
+   "os": "Macos",
+   "title": "Chrome cache",
+   "category": "BrowserCache",
+   "path": "{home}/Library/Caches/Google/Chrome",
+   "tier": "Review",
+   "method": "Vault",
+   "rebuild": "Pages reload their cached files on the next visit",
+   "min_idle_days": 7,
+   "owner_processes": [
+    "Google Chrome",
+    "chrome"
+   ]
+  },
+  {
+   "id": "edge-cache-macos",
+   "os": "Macos",
+   "title": "Edge cache",
+   "category": "BrowserCache",
+   "path": "{home}/Library/Caches/Microsoft Edge",
+   "tier": "Review",
+   "method": "Vault",
+   "rebuild": "Pages reload their cached files on the next visit",
+   "min_idle_days": 7,
+   "owner_processes": [
+    "Microsoft Edge",
+    "msedge"
+   ]
+  },
+  {
+   "id": "vscode-cacheddata-macos",
+   "os": "Macos",
+   "title": "VS Code old-version cache",
+   "category": "EditorData",
+   "path": "{home}/Library/Application Support/Code/CachedData",
+   "tier": "Review",
+   "method": "Vault",
+   "rebuild": "VS Code rebuilds it on the next start",
+   "min_idle_days": 7,
+   "owner_processes": [
+    "Code",
+    "Code Helper"
+   ]
+  },
+  {
+   "id": "cursor-cacheddata-macos",
+   "os": "Macos",
+   "title": "Cursor old-version cache",
+   "category": "EditorData",
+   "path": "{home}/Library/Application Support/Cursor/CachedData",
+   "tier": "Review",
+   "method": "Vault",
+   "rebuild": "Cursor rebuilds it on the next start",
+   "min_idle_days": 7,
+   "owner_processes": [
+    "Cursor",
+    "Cursor Helper"
+   ]
+  },
+  {
+   "id": "xcode-deriveddata",
+   "os": "Macos",
+   "title": "Xcode DerivedData",
+   "category": "EditorData",
+   "path": "{home}/Library/Developer/Xcode/DerivedData",
+   "tier": "Safe",
+   "method": "Vault",
+   "rebuild": "Xcode rebuilds it on the next build",
+   "min_idle_days": 0,
+   "owner_processes": [
+    "Xcode",
+    "xcodebuild"
+   ]
+  },
+  {
+   "id": "xcrun-delete-unavailable",
+   "os": "Macos",
+   "title": "Unavailable simulators (can't be undone)",
+   "category": "EditorData",
+   "path": "{home}/Library/Developer/CoreSimulator/Devices",
+   "tier": "Safe",
+   "method": {
+    "Command": [
+     "xcrun",
+     "simctl",
+     "delete",
+     "unavailable"
+    ]
+   },
+   "rebuild": "Xcode recreates simulators when you need them",
+   "min_idle_days": 0,
+   "owner_processes": []
+  },
+  {
+   "id": "brew-cleanup",
+   "os": "Macos",
+   "title": "Homebrew cleanup (can't be undone)",
+   "category": "PackageCache",
+   "path": "{home}/Library/Caches/Homebrew",
+   "tier": "Safe",
+   "method": {
+    "Command": [
+     "brew",
+     "cleanup",
+     "--prune=30"
+    ]
+   },
+   "rebuild": "Re-downloads packages on the next install",
+   "min_idle_days": 0,
+   "owner_processes": []
+  },
+  {
+   "id": "yarn-cache-windows",
+   "os": "Windows",
+   "title": "Yarn cache",
+   "category": "PackageCache",
+   "path": "{localappdata}/Yarn/Cache",
+   "tier": "Safe",
+   "method": "Vault",
+   "rebuild": "Re-downloads packages on the next install",
+   "min_idle_days": 0,
+   "owner_processes": [
+    "yarn"
+   ]
+  },
+  {
+   "id": "pip-cache-windows",
+   "os": "Windows",
+   "title": "pip cache",
+   "category": "PackageCache",
+   "path": "{localappdata}/pip/Cache",
+   "tier": "Safe",
+   "method": "Vault",
+   "rebuild": "Re-downloads packages on the next install",
+   "min_idle_days": 0,
+   "owner_processes": [
+    "pip",
+    "pip3"
+   ]
+  },
+  {
+   "id": "uv-cache-windows",
+   "os": "Windows",
+   "title": "uv cache",
+   "category": "PackageCache",
+   "path": "{localappdata}/uv/cache",
+   "tier": "Safe",
+   "method": "Vault",
+   "rebuild": "Re-downloads packages on the next install",
+   "min_idle_days": 0,
+   "owner_processes": [
+    "uv"
+   ]
+  },
+  {
+   "id": "pnpm-prune-windows",
+   "os": "Windows",
+   "title": "pnpm store prune (can't be undone)",
+   "category": "PackageCache",
+   "path": "{localappdata}/pnpm/store",
+   "tier": "Safe",
+   "method": {
+    "Command": [
+     "pnpm",
+     "store",
+     "prune"
+    ]
+   },
+   "rebuild": "Re-downloads packages on the next install",
+   "min_idle_days": 0,
+   "owner_processes": []
+  },
+  {
+   "id": "nuget-http-cache",
+   "os": "Windows",
+   "title": "NuGet HTTP cache",
+   "category": "PackageCache",
+   "path": "{localappdata}/NuGet/v3-cache",
+   "tier": "Safe",
+   "method": "Vault",
+   "rebuild": "Re-downloads packages on the next install",
+   "min_idle_days": 0,
+   "owner_processes": [
+    "dotnet",
+    "MSBuild",
+    "devenv"
+   ]
+  },
+  {
+   "id": "playwright-windows",
+   "os": "Windows",
+   "title": "Playwright browsers",
+   "category": "PackageCache",
+   "path": "{localappdata}/ms-playwright",
+   "tier": "Safe",
+   "method": "Vault",
+   "rebuild": "Re-downloads browsers with npx playwright install",
+   "min_idle_days": 0,
+   "owner_processes": []
+  },
+  {
+   "id": "chrome-cache-windows",
+   "os": "Windows",
+   "title": "Chrome cache",
+   "category": "BrowserCache",
+   "path": "{localappdata}/Google/Chrome/User Data/Default/Cache",
+   "tier": "Review",
+   "method": "Vault",
+   "rebuild": "Pages reload their cached files on the next visit",
+   "min_idle_days": 7,
+   "owner_processes": [
+    "Google Chrome",
+    "chrome"
+   ]
+  },
+  {
+   "id": "edge-cache-windows",
+   "os": "Windows",
+   "title": "Edge cache",
+   "category": "BrowserCache",
+   "path": "{localappdata}/Microsoft/Edge/User Data/Default/Cache",
+   "tier": "Review",
+   "method": "Vault",
+   "rebuild": "Pages reload their cached files on the next visit",
+   "min_idle_days": 7,
+   "owner_processes": [
+    "Microsoft Edge",
+    "msedge"
+   ]
+  },
+  {
+   "id": "vscode-cacheddata-windows",
+   "os": "Windows",
+   "title": "VS Code old-version cache",
+   "category": "EditorData",
+   "path": "{appdata}/Code/CachedData",
+   "tier": "Review",
+   "method": "Vault",
+   "rebuild": "VS Code rebuilds it on the next start",
+   "min_idle_days": 7,
+   "owner_processes": [
+    "Code",
+    "Code Helper"
+   ]
+  },
+  {
+   "id": "cursor-cacheddata-windows",
+   "os": "Windows",
+   "title": "Cursor old-version cache",
+   "category": "EditorData",
+   "path": "{appdata}/Cursor/CachedData",
+   "tier": "Review",
+   "method": "Vault",
+   "rebuild": "Cursor rebuilds it on the next start",
+   "min_idle_days": 7,
+   "owner_processes": [
+    "Cursor",
+    "Cursor Helper"
+   ]
+  },
+  {
+   "id": "windows-temp",
+   "os": "Windows",
+   "title": "Temp files older than 7 days",
+   "category": "Temp",
+   "path": "{temp}",
+   "tier": "Safe",
+   "method": {
+    "PruneOlderThan": 7
+   },
+   "rebuild": "Apps recreate temp files when needed",
+   "min_idle_days": 0,
+   "owner_processes": []
+  }
+ ],
+ "build_dirs": [
+  {
+   "name": "node_modules",
+   "requires_any": [
+    "package.json"
+   ],
+   "lockfiles": [
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb"
+   ]
+  },
+  {
+   "name": ".next",
+   "requires_any": [
+    "package.json"
+   ],
+   "lockfiles": [
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb"
+   ]
+  },
+  {
+   "name": ".turbo",
+   "requires_any": [
+    "package.json"
+   ],
+   "lockfiles": [
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb"
+   ]
+  },
+  {
+   "name": ".nuxt",
+   "requires_any": [
+    "package.json"
+   ],
+   "lockfiles": [
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb"
+   ]
+  },
+  {
+   "name": ".svelte-kit",
+   "requires_any": [
+    "package.json"
+   ],
+   "lockfiles": [
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb"
+   ]
+  },
+  {
+   "name": ".parcel-cache",
+   "requires_any": [
+    "package.json"
+   ],
+   "lockfiles": [
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb"
+   ]
+  },
+  {
+   "name": "dist",
+   "requires_any": [
+    "package.json"
+   ],
+   "lockfiles": [
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb"
+   ]
+  },
+  {
+   "name": "build",
+   "requires_any": [
+    "package.json"
+   ],
+   "lockfiles": [
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb"
+   ]
+  },
+  {
+   "name": ".venv",
+   "requires_any": [
+    "pyproject.toml",
+    "requirements.txt"
+   ],
+   "lockfiles": [
+    "uv.lock",
+    "poetry.lock",
+    "requirements.txt"
+   ]
+  },
+  {
+   "name": "venv",
+   "requires_any": [
+    "pyproject.toml",
+    "requirements.txt"
+   ],
+   "lockfiles": [
+    "uv.lock",
+    "poetry.lock",
+    "requirements.txt"
+   ]
+  },
+  {
+   "name": "target",
+   "requires_any": [
+    "Cargo.toml"
+   ],
+   "lockfiles": [
+    "Cargo.lock"
+   ]
+  },
+  {
+   "name": ".gradle",
+   "requires_any": [
+    "build.gradle",
+    "build.gradle.kts"
+   ],
+   "lockfiles": [
+    "gradle.lockfile"
+   ]
+  },
+  {
+   "name": "bin",
+   "requires_any": [
+    "*.csproj",
+    "*.fsproj"
+   ],
+   "lockfiles": [
+    "packages.lock.json"
+   ]
+  },
+  {
+   "name": "obj",
+   "requires_any": [
+    "*.csproj",
+    "*.fsproj"
+   ],
+   "lockfiles": [
+    "packages.lock.json"
+   ]
+  }
+ ],
+ "project_roots_macos": [
+  "{home}/All projects",
+  "{home}/Dev",
+  "{home}/Projects",
+  "{home}/code",
+  "{home}/src",
+  "{home}/Developer",
+  "{home}/Documents/GitHub"
+ ],
+ "project_roots_windows": [
+  "{home}/source/repos",
+  "{home}/Projects",
+  "{home}/Dev",
+  "{home}/code",
+  "{home}/Documents/GitHub"
+ ],
+ "safe_idle_days": 30,
+ "recent_days": 14,
+ "known_daemons": [
+  "codebase-memory-mcp --cbm-daemon-internal",
+  "pm2",
+  "ollama serve"
+ ],
+ "dev_process_patterns": [
+  "node",
+  "npm",
+  "npx",
+  "python",
+  "python3",
+  "uv",
+  "bun",
+  "deno",
+  "tsserver",
+  "esbuild",
+  "vite",
+  "next-server",
+  "turbopack"
+ ],
+ "extra_never": [],
+ "thresholds": {
+  "free_pct": 15,
+  "swap_pct": 75,
+  "growth_gb": 5
+ },
+ "retention": {
+  "safe_days": 3,
+  "review_days": 30,
+  "volume_backup_days": 30
+ },
+ "auto_clean": false
+}
