@@ -3,3 +3,4 @@
 /target/
 node_modules/
 devaudit-survey-*.txt
+.superpowers/
