@@ -176,12 +176,24 @@ pub fn git_ignored(path: &Path, run: &dyn Runner) -> Result<bool, String> {
     Ok(o.stdout.trim().is_empty())
 }
 
-/// Like `platform::inside`, but a side that can't be resolved counts as inside (fail closed).
+/// Like `platform::inside`, but when a side can't be resolved it falls back to a
+/// lexical comparison (equal, or below at a component boundary) instead of "not inside".
 fn maybe_inside(child: &Path, parent: &Path) -> bool {
-    match (platform::canon(child), platform::canon(parent)) {
-        (Ok(_), Ok(_)) => platform::inside(child, parent),
-        _ => true,
+    let (c, p) = (platform::canon(child), platform::canon(parent));
+    if c.is_ok() && p.is_ok() {
+        return platform::inside(child, parent);
     }
+    let c = normalize_path_text(&child.to_string_lossy());
+    let mut parents = vec![normalize_path_text(&parent.to_string_lossy())];
+    if let Ok(p) = p {
+        parents.push(normalize_path_text(&p.to_string_lossy()));
+    }
+    parents.iter().any(|p| {
+        c == *p
+            || c.strip_prefix(p.as_str()).is_some_and(|r| {
+                p.ends_with(std::path::MAIN_SEPARATOR) || r.starts_with(std::path::MAIN_SEPARATOR)
+            })
+    })
 }
 
 fn docker_down(stderr: &str) -> bool {
@@ -492,9 +504,12 @@ mod tests {
         Guard::build(&snap(procs), &FakeRunner::new(), 14, SystemTime::now()).unwrap()
     }
 
-    /// An existing dir that is not inside any test project.
+    /// A nonexistent path outside any test project.
     fn elsewhere() -> String {
-        std::env::temp_dir().to_string_lossy().into_owned()
+        std::env::temp_dir()
+            .join("devaudit-nonexistent-elsewhere")
+            .to_string_lossy()
+            .into_owned()
     }
 
     fn quiet() -> Guard {
@@ -910,6 +925,27 @@ mod tests {
             "{:?}",
             a.reasons
         );
+    }
+
+    #[test]
+    fn dangling_cwd_elsewhere_does_not_lock() {
+        let d = old_repo();
+        let g = guard(vec![p(5, "zsh", Some(&elsewhere()), &[])]);
+        let a = g.check(d.path(), &real());
+        assert!(!a.locked, "{:?}", a.reasons);
+        // Sibling-prefix of an unresolvable path is not "inside" either.
+        assert!(!maybe_inside(
+            Path::new("/nope/app2/x"),
+            Path::new("/nope/app")
+        ));
+        assert!(maybe_inside(
+            Path::new("/nope/app/x"),
+            Path::new("/nope/app")
+        ));
+        assert!(maybe_inside(
+            Path::new("/nope/app"),
+            Path::new("/nope/app/")
+        ));
     }
 
     #[test]
