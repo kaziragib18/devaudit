@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod disk;
 pub mod docker;
 pub mod guard;
@@ -7,6 +8,7 @@ pub mod never;
 pub mod platform;
 pub mod procs;
 pub mod projects;
+pub mod recovery;
 pub mod report;
 pub mod rules;
 pub mod run;

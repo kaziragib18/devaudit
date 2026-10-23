@@ -380,7 +380,7 @@ fn parse_worktrees(s: &str) -> Vec<(PathBuf, Option<String>)> {
 }
 
 /// A worktree's own top-level `.git` link file is expected; anything else secret-named is not.
-fn secret_in_worktree(wt: &Path) -> Result<Option<PathBuf>, String> {
+pub(crate) fn secret_in_worktree(wt: &Path) -> Result<Option<PathBuf>, String> {
     let rd = fs::read_dir(wt).map_err(|e| format!("cannot read {}: {e}", wt.display()))?;
     for e in rd {
         let e = e.map_err(|e| format!("cannot read {}: {e}", wt.display()))?;

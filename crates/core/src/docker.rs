@@ -279,13 +279,14 @@ fn allowance_advice(ctx: &Ctx, vm: &VmInfo, ram_total: u64, swap_used_pct: u8) -
 
 // ---------------------------------------------------------------- containers
 
-struct Container {
-    id: String,
+pub(crate) struct Container {
+    pub(crate) id: String,
     name: String,
     image: String,
     project: Option<String>,
-    running: bool,
-    mounts: Vec<String>,
+    pub(crate) running: bool,
+    /// Names of the volumes it mounts.
+    pub(crate) mounts: Vec<String>,
 }
 
 fn parse_containers(text: &str) -> Result<Vec<Container>, String> {
@@ -313,6 +314,51 @@ fn parse_containers(text: &str) -> Result<Vec<Container>, String> {
             })
         })
         .collect())
+}
+
+/// Every container, running or stopped. Err when Docker can't be read (fail closed).
+pub(crate) fn list_containers(run: &dyn Runner) -> Result<Vec<Container>, String> {
+    match call(
+        run,
+        &["docker", "ps", "-a", "--no-trunc", "--format", "{{json .}}"],
+    ) {
+        Call::Out(t) => parse_containers(&t),
+        Call::Down | Call::Missing => Err("Docker isn't answering".into()),
+        Call::Fail(e) => Err(e),
+    }
+}
+
+/// What `docker system df -v` says about one volume, plus whether any image exists.
+pub(crate) struct VolumeInfo {
+    pub(crate) bytes: u64,
+    /// `Links` is 0: nothing references it.
+    pub(crate) unreferenced: bool,
+    pub(crate) local_images: usize,
+}
+
+pub(crate) fn volume_info(run: &dyn Runner, name: &str) -> Result<VolumeInfo, String> {
+    let t = match call(
+        run,
+        &["docker", "system", "df", "-v", "--format", "{{json .}}"],
+    ) {
+        Call::Out(t) => t,
+        Call::Down | Call::Missing => return Err("Docker isn't answering".into()),
+        Call::Fail(e) => return Err(e),
+    };
+    let df: Value =
+        serde_json::from_str(t.trim()).map_err(|e| format!("unreadable disk usage: {e}"))?;
+    let v = arr(&df, "Volumes")
+        .iter()
+        .find(|v| field(v, "Name").as_deref() == Some(name))
+        .ok_or_else(|| format!("Docker volume {name} no longer exists"))?;
+    let bytes = field(v, "Size")
+        .and_then(|s| parse_size(&s))
+        .ok_or_else(|| format!("can't read the size of Docker volume {name}"))?;
+    Ok(VolumeInfo {
+        bytes,
+        unreferenced: field(v, "Links").as_deref() == Some("0"),
+        local_images: arr(&df, "Images").len(),
+    })
 }
 
 /// Image repository without registry host, tag or digest, lowercased.

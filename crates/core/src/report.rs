@@ -131,7 +131,7 @@ fn disk_info(
     }
 }
 
-fn build_guard(ctx: &Ctx, snap: &procs::Snapshot) -> Result<Guard, GuardError> {
+pub(crate) fn build_guard(ctx: &Ctx, snap: &procs::Snapshot) -> Result<Guard, GuardError> {
     Guard::build(snap, ctx.run, ctx.rules.recent_days, ctx.now)
 }
 
