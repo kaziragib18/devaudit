@@ -174,7 +174,35 @@ pub fn user_sid() -> Option<String> {
 }
 
 /// `tmutil addexclusion` (sticky, no root needed). Err carries tmutil's stderr.
+/// Test runs skip the real tmutil: EDR tools flag repeated backup exclusions as ransomware-like.
 pub fn hide_from_backup_and_index(dir: &Path) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Err(format!("{}: not a folder", dir.display()));
+    }
+    if under_test() {
+        #[cfg(test)]
+        HIDDEN.with(|h| h.borrow_mut().push(dir.to_path_buf()));
+        return Ok(());
+    }
+    tmutil_addexclusion(dir)
+}
+
+#[cfg(test)]
+thread_local! {
+    static HIDDEN: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Test helper: `hide_from_backup_and_index` was called for this dir (on this test thread).
+#[cfg(test)]
+pub(crate) fn is_hidden_from_backup_and_index(dir: &Path) -> bool {
+    HIDDEN.with(|h| h.borrow().iter().any(|p| p == dir))
+}
+
+fn under_test() -> bool {
+    cfg!(test) || (cfg!(debug_assertions) && std::env::var_os("DEVAUDIT_TEST_ROOT").is_some())
+}
+
+fn tmutil_addexclusion(dir: &Path) -> Result<(), String> {
     let o = Command::new("/usr/bin/tmutil")
         .arg("addexclusion")
         .arg(dir)
@@ -192,16 +220,6 @@ pub fn hide_from_backup_and_index(dir: &Path) -> Result<(), String> {
 /// Read-only files can be removed on macOS (the dir's permissions decide): nothing to clear.
 pub fn clear_readonly_tree(_dir: &Path) -> bool {
     false
-}
-
-/// Test helper: `tmutil isexcluded` says the dir is excluded.
-#[cfg(test)]
-pub(crate) fn is_hidden_from_backup_and_index(dir: &Path) -> bool {
-    Command::new("/usr/bin/tmutil")
-        .arg("isexcluded")
-        .arg(dir)
-        .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("[Excluded]"))
 }
 
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
@@ -270,9 +288,18 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test]
-    fn hide_from_backup_and_index_marks_dir() {
+    fn hide_from_backup_and_index_skips_tmutil_in_tests() {
         let d = tempfile::tempdir().unwrap();
         hide_from_backup_and_index(d.path()).unwrap();
+        assert!(hide_from_backup_and_index(&d.path().join("missing")).is_err());
+    }
+
+    // Runs the real tmutil, which EDR tools flag. Run by hand: cargo test -- --ignored
+    #[test]
+    #[ignore = "runs the real tmutil"]
+    fn hide_from_backup_and_index_marks_dir() {
+        let d = tempfile::tempdir().unwrap();
+        tmutil_addexclusion(d.path()).unwrap();
         let o = std::process::Command::new("/usr/bin/tmutil")
             .arg("isexcluded")
             .arg(d.path())
@@ -280,7 +307,6 @@ mod tests {
             .unwrap();
         let s = String::from_utf8_lossy(&o.stdout);
         assert!(s.contains("[Excluded]"), "{s}");
-        assert!(hide_from_backup_and_index(&d.path().join("missing")).is_err());
     }
 
     #[test]
